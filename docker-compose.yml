@@ -1,0 +1,26 @@
+# 本文件定义单容器 POC、本地 SQLite 持久化和只读登录态挂载。
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////app/data/app.sqlite3
+      XIANYU_STORAGE_STATE_PATH: /app/storage_state.json
+      XIANYU_HEADLESS: "false"
+      XIANYU_MAX_PAGES: "3"
+      XIANYU_MAX_ITEMS: "50"
+      XIANYU_PAGE_DELAY_SECONDS: "2.0"
+      LOG_LEVEL: INFO
+    volumes:
+      - app_data:/app/data
+      - ./storage_state.json:/app/storage_state.json:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  app_data:

@@ -1,0 +1,28 @@
+# 本文件定义项目必须忽略的本地运行产物和敏感文件。
+# 它保护登录态、环境变量、数据库与缓存，不描述应用业务行为。
+.env
+state/
+playwright/.auth/
+storage_state.json
+*.storage_state.json
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+data/
+*.db
+*.sqlite
+*.sqlite3
+test-results/
+playwright-report/

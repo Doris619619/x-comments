@@ -1,0 +1,68 @@
+<!doctype html>
+<!-- 本页面是闲鱼采集 POC 内部验收入口，只调用本项目 REST API，不包含硬编码商品。 -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>闲鱼关键词采集 POC</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">POC internal demo</p>
+        <h1>闲鱼关键词商品采集</h1>
+        <p>有限范围采集，只展示数据库中的公开商品；遇到登录或风控提示会立即停止。</p>
+      </header>
+
+      <section class="panel" aria-labelledby="crawl-title">
+        <h2 id="crawl-title">创建采集任务</h2>
+        <form id="crawl-form">
+          <label for="keyword">搜索关键词</label>
+          <div class="form-row">
+            <input id="keyword" name="keyword" value="女生发饰" maxlength="100" required />
+            <button id="submit-button" type="submit">开始采集</button>
+          </div>
+        </form>
+        <div id="message" class="message" role="status" aria-live="polite">可创建新任务，或查看数据库中的历史商品。</div>
+        <dl id="job-stats" class="stats" hidden>
+          <div><dt>任务状态</dt><dd id="job-status">—</dd></div>
+          <div><dt>发现</dt><dd id="discovered-count">0</dd></div>
+          <div><dt>新增</dt><dd id="new-count">0</dd></div>
+          <div><dt>更新</dt><dd id="updated-count">0</dd></div>
+          <div><dt>重复</dt><dd id="duplicate-count">0</dd></div>
+          <div><dt>错误</dt><dd id="error-count">0</dd></div>
+        </dl>
+      </section>
+
+      <section class="results" aria-labelledby="results-title">
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">数据库结果</p>
+            <h2 id="results-title">真实商品</h2>
+          </div>
+          <p id="result-summary">正在读取历史商品…</p>
+        </div>
+        <div id="items" class="items" aria-live="polite"></div>
+        <nav class="pagination" aria-label="商品分页">
+          <button id="previous-page" type="button">上一页</button>
+          <span id="page-label">第 1 页</span>
+          <button id="next-page" type="button">下一页</button>
+        </nav>
+      </section>
+    </main>
+    <template id="item-template">
+      <article class="item-card">
+        <div class="image-wrap"><img loading="lazy" alt="" /></div>
+        <div class="item-body">
+          <h3></h3>
+          <p class="price"></p>
+          <p class="location"></p>
+          <a target="_blank" rel="noopener noreferrer">查看闲鱼原商品</a>
+        </div>
+      </article>
+    </template>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
+

@@ -1,0 +1,39 @@
+{
+  "data": {
+    "resultList": [
+      {
+        "data": {
+          "item": {
+            "main": {
+              "targetUrl": "https://www.goofish.com/item?id=10001&categoryId=1",
+              "exContent": {
+                "itemId": "10001",
+                "title": "  蝴蝶结  发夹  ",
+                "price": [{"text": "当前价"}, {"text": "¥12.80"}],
+                "picUrl": "//example.invalid/item-10001.jpg",
+                "area": "杭州"
+              }
+            }
+          }
+        }
+      },
+      {
+        "data": {
+          "item": {
+            "main": {
+              "targetUrl": "https://www.goofish.com/item?id=10002",
+              "exContent": {
+                "itemId": "10002",
+                "title": "珍珠发箍",
+                "price": [{"text": "¥9.90"}],
+                "picUrl": "https://example.invalid/item-10002.jpg",
+                "area": "上海"
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+
