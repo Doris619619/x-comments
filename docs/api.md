@@ -1,45 +1,272 @@
-# REST API
+# 前后端交互接口文档
 
-## GET /health
+> 数据模型（表、字段、状态枚举）见 [data-model.md](./data-model.md)。
 
-验证应用与数据库连接。成功：
+> 基础路径：无统一前缀；业务接口挂在 `/api/v1/...`，健康检查与演示页在根路径。  
+> 认证方式：**当前 POC 无登录鉴权**，所有接口均可直接调用。  
+> 校验失败统一返回 **422**（Pydantic 参数校验）；业务错误见各状态码。
+> 商城对接方式：Next.js 仅在服务器端通过 HTTP 调用本服务；当前服务未配置 CORS，浏览器不得直接调用商品接口。
+
+## 通用约定
+
+| 项目 | 说明 |
+|------|------|
+| Content-Type | `application/json` |
+| 任务执行 | `POST /api/v1/crawl-jobs` 立即落库 `pending`，并入队单 worker；正式应用 lifespan 启 worker，测试应用可禁用 |
+| 排序（商品列表） | `last_seen_at DESC, item_id ASC` |
+| OpenAPI | FastAPI 自动生成：`/docs`、`/openapi.json` |
+
+### 错误响应格式
 
 ```json
-{"status":"ok","database":"ok"}
+{
+  "detail": "错误描述"
+}
 ```
 
-## POST /api/v1/crawl-jobs
+校验失败（**422**）时 `detail` 为 FastAPI/Pydantic 校验错误列表。
 
-请求：
+### 采集任务状态
+
+| 值 | 含义 |
+|----|------|
+| `pending` | 已创建，等待 worker |
+| `running` | 正在采集 |
+| `succeeded` | 成功完成 |
+| `partially_succeeded` | 部分成功 |
+| `failed` | 失败 |
+| `blocked_by_auth_or_risk_control` | 登录失效或风控，安全停止 |
+
+---
+
+## 1. 健康检查
+
+### `GET /health`
+
+验证应用与数据库连通性。无需认证。
+
+**响应 200**
 
 ```json
-{"keyword":"女生发饰"}
+{
+  "status": "ok",
+  "database": "ok"
+}
 ```
 
-立即返回 HTTP `202` 与完整任务对象，其中包含 `job_id` 和 `pending` 状态。Goal 1 只创建离线任务记录；Goal 2 接入后台 worker 后才会转换到运行终态。
+数据库不可用时由框架返回错误（非业务 200）。
 
-## GET /api/v1/crawl-jobs/{job_id}
 
-返回任务状态、时间、统计和安全错误。不存在返回 HTTP `404`。
+## 2. 采集任务
 
-## GET /api/v1/items
+### `POST /api/v1/crawl-jobs`
 
-查询参数：
+创建关键词采集任务：写入 `pending` 记录，若应用已挂载 worker 则立即入队，并返回完整任务对象（含 `job_id`）。
 
-- `page`：默认 1，最小 1；
-- `page_size`：默认 20，范围 1–100；
-- `keyword`：可选，按规范化关键词关联过滤。
+**请求体**
 
-响应包含 `items`、`page`、`page_size`、`total` 和 `pages`，按 `last_seen_at DESC, item_id ASC` 稳定排序。
+```json
+{
+  "keyword": "女生发饰"
+}
+```
 
-## GET /api/v1/items/{item_id}
+| 字段 | 类型 | 约束 |
+|------|------|------|
+| keyword | string | 必填；去首尾空白并折叠中间空白后 1–100 字符；全空白视为非法 |
 
-返回单个数据库商品；不存在返回 HTTP `404`。
+**响应 202**
 
-## OpenAPI
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "keyword": "女生发饰",
+  "status": "pending",
+  "created_at": "2026-07-13T03:00:00+00:00",
+  "started_at": null,
+  "finished_at": null,
+  "discovered_count": 0,
+  "new_count": 0,
+  "updated_count": 0,
+  "duplicate_count": 0,
+  "error_count": 0,
+  "error_message": null
+}
+```
 
-FastAPI 自动生成 `/docs` 和 `/openapi.json`。离线集成测试会生成 OpenAPI 并核对任务路径。
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| job_id | string | UUID，任务主键 |
+| keyword | string | 清洗后的展示关键词 |
+| status | string | 见「采集任务状态」 |
+| created_at / started_at / finished_at | datetime \| null | UTC 时间；未开始/未结束为 `null` |
+| discovered_count | int | 本轮发现条数 |
+| new_count | int | 新入库条数 |
+| updated_count | int | 已存在并更新条数 |
+| duplicate_count | int | 重复条数 |
+| error_count | int | 处理错误条数 |
+| error_message | string \| null | 安全错误说明（如风控停止原因）；成功时为 `null` |
 
-## POC 测试页面
+关键词不合法：**422**。
 
-`GET /` 返回 `POC internal demo`。页面只调用上述 REST API，最多轮询约 3 分钟；商品每页 12 条。静态资源位于 `/static/`。
+---
+
+### `GET /api/v1/crawl-jobs/{job_id}`
+
+查询任务状态、时间戳、统计与安全错误信息。前端可轮询直至终态。
+
+**路径参数**
+
+| 参数 | 类型 | 约束 |
+|------|------|------|
+| job_id | string | 任务 UUID |
+
+**响应 200**：结构同创建接口的任务对象（`status` 等字段会随执行更新）。
+
+**错误**
+
+| 状态码 | 说明 |
+|--------|------|
+| 404 | `{"detail": "采集任务不存在"}` |
+
+---
+
+## 3. 商品
+
+### `GET /api/v1/items`
+
+分页查询已入库商品；可选按规范化关键词关联过滤。
+
+**查询参数**
+
+| 参数 | 类型 | 约束 | 默认 |
+|------|------|------|------|
+| page | int | ≥ 1 | 1 |
+| page_size | int | 1–100 | 20 |
+| keyword | string \| null | 可选，≤ 100 字符；按关键词关联过滤 | 不传则不过滤 |
+| category | string \| null | 可选，≤ 64 字符；按杂货铺采集清单分类过滤 | 不传则不过滤 |
+
+**响应 200**
+
+```json
+{
+  "items": [
+    {
+      "item_id": "123456789012",
+      "title": "蝴蝶结发夹",
+      "price": "12.50",
+      "image_url": "https://example.com/a.jpg",
+      "item_url": "https://www.goofish.com/item?id=123456789012",
+      "location": "上海",
+      "source": "xianyu",
+      "first_seen_at": "2026-07-13T03:01:00+00:00",
+      "last_seen_at": "2026-07-13T03:01:00+00:00",
+      "created_at": "2026-07-13T03:01:00+00:00",
+      "updated_at": "2026-07-13T03:01:00+00:00"
+    }
+  ],
+  "page": 1,
+  "page_size": 20,
+  "total": 1,
+  "pages": 1
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| items | array | 当前页商品列表 |
+| page / page_size | int | 当前页与每页大小 |
+| total | int | 符合条件的总条数 |
+| pages | int | 总页数 |
+
+商品字段说明：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| item_id | string | 闲鱼商品唯一 ID |
+| title | string | 标题 |
+| price | decimal string | `NUMERIC(12,2)` 序列化结果，如 `"12.50"` |
+| image_url | string \| null | 主图；缺失为 `null`，不伪造 |
+| item_url | string | 商品链接 |
+| location | string \| null | 公开地区；缺失为 `null` |
+| source | string | 来源，当前为 `xianyu` |
+| first_seen_at / last_seen_at | datetime | 首次 / 最近发现时间 |
+| created_at / updated_at | datetime | 行创建 / 更新时间 |
+
+参数不合法：**422**。
+
+### 商城服务器端读取约定
+
+商城服务应从其服务器端调用 `GET /api/v1/items` 和 `GET /api/v1/items/{item_id}`，并将
+`item_id` 作为稳定外部标识。列表和详情可安全读取 `item_id`、`title`、`price`、`image_url`、
+`location`、`last_seen_at` 与 `source`；`image_url`、`location` 允许为 `null`，调用方必须降级展示。
+本 POC 不设置宽松 CORS，也不允许将服务端地址或未来鉴权信息暴露给浏览器。
+
+商城首页可用 `category=潮玩手办`、`category=实用小物` 或 `category=怀旧收藏` 筛选。分类由
+`catalog_keywords` 配置关联到实际采集词；当某个新增词尚未完成第一轮采集时，分类会合法地返回空列表。
+
+---
+
+### `GET /api/v1/items/{item_id}`
+
+返回单个已入库商品。
+
+**路径参数**
+
+| 参数 | 类型 | 约束 |
+|------|------|------|
+| item_id | string | 闲鱼商品 ID |
+
+**响应 200**：单个商品对象（字段同列表中的元素）。
+
+**错误**
+
+| 状态码 | 说明 |
+|--------|------|
+| 404 | `{"detail": "商品不存在"}` |
+
+---
+
+## 4. 杂货铺搜索清单
+
+### `GET /api/v1/catalog-keywords`
+
+返回已启用的持久化杂货铺搜索清单。该接口只读；当前 POC 不开放未鉴权的浏览器配置写入。
+
+**响应 200**
+
+```json
+[
+  {
+    "id": 1,
+    "category": "潮玩收藏",
+    "keyword": "手办",
+    "interval_minutes": 60,
+    "last_scheduled_at": "2026-07-15T10:00:00+00:00",
+    "note": "动漫、模型和小摆件"
+  }
+]
+```
+
+---
+
+## 5. POC 演示页
+
+### `GET /`
+
+返回内部演示 HTML（`POC internal demo`）。页面只调用上述 REST API：创建任务后轮询状态（约最多 3 分钟），商品列表每页 12 条。静态资源位于 `/static/`。
+
+不纳入 OpenAPI schema。
+
+---
+
+## 推荐调用顺序（闭环）
+
+```text
+1. GET  /health
+2. POST /api/v1/crawl-jobs          → 拿到 job_id
+3. GET  /api/v1/crawl-jobs/{job_id} → 轮询至终态
+4. GET  /api/v1/items?keyword=女生发饰&page=1&page_size=12
+```
+
+登录失效或风控时，任务会进入 `blocked_by_auth_or_risk_control`，`error_message` 给出安全停止原因；不得自动重试或绕过。详见 [known-limitations.md](./known-limitations.md)。

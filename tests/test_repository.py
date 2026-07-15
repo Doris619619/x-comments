@@ -10,9 +10,11 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.models.crawl_job import CrawlJob, CrawlJobStatus
 from app.models.item import Item
 from app.models.keyword import ItemKeyword
 from app.repositories.items import ItemRepository
+from app.repositories.jobs import JobRepository
 from app.schemas.item import ParsedItem
 
 
@@ -72,3 +74,25 @@ def test_pagination_and_keyword_filter(session_factory: sessionmaker[Session]) -
         assert len(rows) == 2
         assert total == 3
         assert pages == 2
+
+
+def test_recover_interrupted_jobs_marks_running_job_failed(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """
+    验证服务重启时遗留的 running 任务会结束，避免阻塞后续采集。
+
+    输入内存会话工厂；断言失败抛出 AssertionError；副作用仅为内存任务状态写入。
+    """
+
+    with session_factory() as session:
+        job = JobRepository(session).create("遥控器")
+        job.status = CrawlJobStatus.RUNNING
+        session.commit()
+        recovered = JobRepository(session).recover_interrupted_jobs()
+        refreshed = session.get(CrawlJob, job.job_id)
+
+    assert recovered == 1
+    assert refreshed is not None
+    assert refreshed.status is CrawlJobStatus.FAILED
+    assert refreshed.error_message == "采集进程已重启，上一轮任务未完成而安全停止"

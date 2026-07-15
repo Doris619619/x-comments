@@ -98,7 +98,10 @@ class CrawlWorker:
             session.commit()
             keyword = job.keyword
         try:
-            result = await self.crawler.collect(keyword)
+            result = await asyncio.wait_for(
+                self.crawler.collect(keyword),
+                timeout=self.crawler.settings.xianyu_collect_timeout_seconds,
+            )
             seen_at = datetime.now().astimezone()
             with self.session_factory() as session:
                 stats = ItemRepository(session).upsert_many(keyword, result.items, seen_at)
@@ -120,6 +123,12 @@ class CrawlWorker:
                 session.commit()
         except RiskControlBlocked as exc:
             self._finish_error(job_id, CrawlJobStatus.BLOCKED, str(exc))
+        except TimeoutError:
+            self._finish_error(
+                job_id,
+                CrawlJobStatus.FAILED,
+                "采集超过安全时限，已停止并等待下一轮调度",
+            )
         except Exception as exc:
             self._finish_error(job_id, CrawlJobStatus.FAILED, f"采集执行失败：{type(exc).__name__}")
 

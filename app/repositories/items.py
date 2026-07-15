@@ -11,6 +11,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.catalog_keyword import CatalogKeyword
 from app.models.item import Item
 from app.models.keyword import ItemKeyword, Keyword
 from app.schemas.item import ParsedItem
@@ -124,12 +125,12 @@ class ItemRepository:
         return UpsertStats(len(items), new, updated, duplicate)
 
     def list_page(
-        self, page: int, page_size: int, keyword: str | None
+        self, page: int, page_size: int, keyword: str | None, category: str | None = None
     ) -> tuple[list[Item], int, int]:
         """
         返回稳定排序的商品分页数据。
 
-        输入页码、大小和可选关键词，返回商品、总数、总页数；无写入副作用。
+        输入页码、大小、可选关键词和分类，返回商品、总数、总页数；无写入副作用。
         """
 
         query = select(Item)
@@ -143,6 +144,20 @@ class ItemRepository:
                 count_query.join(ItemKeyword)
                 .join(Keyword)
                 .where(Keyword.normalized_value == normalized)
+            )
+        if category:
+            query = (
+                query.join(ItemKeyword)
+                .join(Keyword)
+                .join(CatalogKeyword, CatalogKeyword.keyword == Keyword.display_value)
+                .where(CatalogKeyword.category == category)
+                .distinct()
+            )
+            count_query = (
+                count_query.join(ItemKeyword)
+                .join(Keyword)
+                .join(CatalogKeyword, CatalogKeyword.keyword == Keyword.display_value)
+                .where(CatalogKeyword.category == category)
             )
         total = int(self.session.scalar(count_query) or 0)
         rows = list(

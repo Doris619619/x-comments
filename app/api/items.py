@@ -19,15 +19,16 @@ def list_items(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     keyword: str | None = Query(default=None, max_length=100),
+    category: str | None = Query(default=None, max_length=64),
     session: Session = Depends(get_db),
 ) -> ItemPage:
     """
-    返回数据库商品分页，可按关键词过滤。
+    返回数据库商品分页，可按关键词或杂货铺分类过滤。
 
     输入分页参数和会话，返回分页对象；数据库错误向上抛出；无写入副作用。
     """
 
-    rows, total, pages = ItemRepository(session).list_page(page, page_size, keyword)
+    rows, total, pages = ItemRepository(session).list_page(page, page_size, keyword, category)
     return ItemPage(
         items=[ItemRead.model_validate(row) for row in rows],
         page=page,

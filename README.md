@@ -104,6 +104,7 @@ docker compose down
 python -m pytest -q
 python -m ruff check app tests alembic scripts
 python -m mypy app
+python -m scripts.check_chinese_docstrings
 ```
 
 自动测试使用内存 SQLite 和脱敏 fixture，不访问真实闲鱼。
