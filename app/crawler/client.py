@@ -47,14 +47,15 @@ class XianyuCrawler:
     输入配置；网络、页面或结构错误向上抛出；副作用仅为有限页面访问。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, account_lock: asyncio.Lock | None = None) -> None:
         """
         保存已校验配置。
 
-        输入 Settings；无返回和异常；不启动浏览器。
+        输入 Settings 与可选账号级锁；无返回和异常；不启动浏览器。
         """
 
         self.settings = settings
+        self.account_lock = account_lock or asyncio.Lock()
 
     async def collect(self, keyword: str) -> CrawlResult:
         """
@@ -63,16 +64,17 @@ class XianyuCrawler:
         输入关键词；返回解析结果；认证/风控抛出 RiskControlBlocked，其他错误向上抛出。
         """
 
-        state_path = Path(self.settings.xianyu_storage_state_path)
-        if not state_path.is_file():
-            raise RiskControlBlocked("本地登录态文件不存在，需要人工重新登录")
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=self.settings.xianyu_headless)
-            try:
-                context = await browser.new_context(storage_state=str(state_path))
-                return await self._collect_in_context(context, keyword)
-            finally:
-                await browser.close()
+        async with self.account_lock:
+            state_path = Path(self.settings.xianyu_storage_state_path)
+            if not state_path.is_file():
+                raise RiskControlBlocked("本地登录态文件不存在，需要人工重新登录")
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=self.settings.xianyu_headless)
+                try:
+                    context = await browser.new_context(storage_state=str(state_path))
+                    return await self._collect_in_context(context, keyword)
+                finally:
+                    await browser.close()
 
     async def _collect_in_context(self, context: BrowserContext, keyword: str) -> CrawlResult:
         """
