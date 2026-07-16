@@ -177,3 +177,12 @@ class ItemRepository:
         """
 
         return self.session.get(Item, item_id)
+
+    def exists(self, item_id: str) -> bool:
+        """
+        判断指定商品 ID 是否存在，供不需要 ORM 对象的业务服务使用。
+
+        输入商品 ID，返回布尔值；数据库错误向上抛出，无写入副作用。
+        """
+
+        return self.session.scalar(select(Item.item_id).where(Item.item_id == item_id)) is not None

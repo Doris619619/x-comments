@@ -11,6 +11,8 @@ services:
       XIANYU_MAX_PAGES: "3"
       XIANYU_MAX_ITEMS: "50"
       XIANYU_PAGE_DELAY_SECONDS: "2.0"
+      XIANYU_VERIFY_TIMEOUT_SECONDS: "12"
+      XIANYU_API_TOKEN: "${XIANYU_API_TOKEN:-}"
       LOG_LEVEL: INFO
     volumes:
       - app_data:/app/data

@@ -21,3 +21,19 @@ RISK_TEXT_SIGNALS = (
     "非法访问",
     "请使用正常浏览器",
 )
+EXPLICIT_UNAVAILABLE_TEXT_SIGNALS = (
+    "宝贝已下架",
+    "商品已下架",
+    "宝贝已售出",
+    "商品已售出",
+    "宝贝已被卖掉",
+    "商品已被删除",
+    "宝贝不存在",
+)
+DETAIL_PRICE_SELECTORS = (
+    "[data-testid='item-price']",
+    "[itemprop='price']",
+    "main [class*='ItemPrice']",
+    "main [class*='item-price']",
+    "main [class*='price--']",
+)
