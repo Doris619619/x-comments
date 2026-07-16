@@ -6,7 +6,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     xianyu_max_items: int = Field(default=50, ge=1, le=50)
     xianyu_page_delay_seconds: float = Field(default=2.0, ge=1.0, le=10.0)
     xianyu_collect_timeout_seconds: int = Field(default=120, ge=30, le=300)
+    xianyu_verify_timeout_seconds: int = Field(default=12, ge=5, le=30)
+    xianyu_api_token: SecretStr | None = None
     catalog_scheduler_interval_seconds: int = Field(default=600, ge=60, le=3600)
     log_level: str = "INFO"
 

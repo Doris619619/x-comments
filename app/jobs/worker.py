@@ -24,15 +24,20 @@ class CrawlWorker:
     输入会话工厂和配置；任务异常会安全落库；启动/停止会创建或取消后台协程。
     """
 
-    def __init__(self, session_factory: sessionmaker[Session], settings: Settings) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        settings: Settings,
+        account_lock: asyncio.Lock | None = None,
+    ) -> None:
         """
         初始化空队列和爬虫依赖。
 
-        输入会话工厂与配置；无返回；仅创建内存对象。
+        输入会话工厂、配置与可选账号级锁；无返回；仅创建内存对象。
         """
 
         self.session_factory = session_factory
-        self.crawler = XianyuCrawler(settings)
+        self.crawler = XianyuCrawler(settings, account_lock)
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.task: asyncio.Task[None] | None = None
 

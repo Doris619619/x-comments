@@ -24,6 +24,12 @@ HTTP 请求
   → GET /api/v1/items 或 /api/v1/items/{item_id}
   → app/api → repositories → 数据库
 
+商城结算核验
+  → Next.js 服务器携带 Bearer 令牌
+  → POST /api/v1/items/{item_id}/verify
+  → app/api 鉴权 → app/services 存在性与价格比较
+  → app/crawler 单次详情访问 → 五状态失败关闭响应
+
 杂货铺定时采集（Goal 4）
   → catalog_keywords 持久化搜索清单
   → app/jobs/scheduler 每 10 分钟选择一个到期词
@@ -42,6 +48,8 @@ HTTP 请求
 - `catalog_keywords`：杂货铺分类与持久化搜索清单，当前有潮玩手办、实用小物、怀旧收藏三个首页分类，共 18 个搜索词。
 - `alembic/`：数据库结构版本。
 - 商城不读取本服务数据库，也不从浏览器直接调用本服务；跨服务边界固定为只读 HTTP API。
+- `app/services/item_verification.py`：只依赖商品存在性协议和实时核验协议，不依赖 ORM 模型。
+- `app/crawler/item_verifier.py`：单次详情身份、风险、不可售文案和当前价格核验；不写数据库。
 
 ## 数据流
 
@@ -59,9 +67,17 @@ HTTP 请求
 
 登录态路径由 `XIANYU_STORAGE_STATE_PATH` 配置。`storage_state.json`、`state/` 和 `*.storage_state.json` 已加入 `.gitignore`，应用日志和数据库都不得保存其内容。
 
+结算核验超时由 `XIANYU_VERIFY_TIMEOUT_SECONDS` 配置，默认 12 秒，必须短于商城侧 HTTP
+超时。`XIANYU_API_TOKEN` 是商城服务器与本服务共享的至少 32 字符随机令牌；未配置时核验接口返回
+503，不允许匿名降级。示例值只在 `.env.example`，真实值不得提交。
+
 ## 安全边界
 
 项目只访问公开商品搜索页面，不采集私聊、手机号、精确地址或其他非公开个人信息。验证码、登录失效、403/429、访问频繁和结构异常必须停止，禁止绕过、代理轮换或多账号续爬。
+
+正式应用为同一进程的采集 worker 与结算核验器注入同一个 `asyncio.Lock`。等待锁也计入各自
+安全超时，因此同一登录态不会在定时采集与并发结算中被同时使用。核验器每次只导航一次，
+不会因超时、未知结构或风控自动重试。
 
 ## 容器运行
 

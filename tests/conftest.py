@@ -43,7 +43,7 @@ def client(session_factory: sessionmaker[Session]) -> Generator[TestClient, None
     输入内存会话工厂，返回客户端；请求错误由测试断言；不访问外部网络。
     """
 
-    application = create_app()
+    application = create_app(verification_token="offline-test-token-0123456789abcdef")
 
     def override_db() -> Generator[Session, None, None]:
         """为一次测试请求提供内存会话，并在结束时关闭。"""
