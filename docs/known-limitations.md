@@ -8,7 +8,7 @@
 - 已实现基于完整成功采集的 `suspected_missing`/`off_shelf` 状态机，但当前搜索范围最多 3 页或 50 条，仍不能把一次或不完整范围的消失视作商品真实售出。详情页明确售出/下架复查尚未接入自动状态机。
 - 新增搜索词需要完成至少一轮安全采集后才会在对应首页分类显示商品；当前不会为了快速填满分类而并发或高频补抓。
 - 单次采集最长 120 秒；超时或进程重启遗留的 running 任务会明确失败并释放单 worker，后续关键词仍按安全间隔继续调度。
-- 运行时已在本机 Docker Compose 的 PostgreSQL 16 上完成真实迁移、采集、revision 发布、服务重启和 shopping 隔离镜像同步验证。云端将同机部署两个服务，Catalog Sync 默认仅绑定 `127.0.0.1`；x-comments 部署负责人负责 PostgreSQL 迁移、每日备份保留 7 天（需要时可延长至 14 天）、真实 `.env`、登录态与令牌的密钥管理，以及向既有运维群或邮箱发送失败告警。代码不会改写含密的 `.env`。
+- 运行时已在 Docker Compose 的 PostgreSQL 16 上完成真实迁移、采集、revision 发布、服务重启和 shopping 隔离镜像同步验证。云端同机部署时，Catalog Sync 对宿主机仅绑定 `127.0.0.1`，shopping 的独立同步容器经共享 Docker 私有网络访问 `x-comments-api:8000`；x-comments 部署负责人负责 PostgreSQL 迁移、每日备份保留 7 天（需要时可延长至 14 天）、真实 `.env`、登录态与令牌的密钥管理。外部失败告警须在服务器配置运维群或邮箱的 webhook，未配置前只能记录 systemd 失败日志。代码不会改写含密的 `.env`。
 - API 创建的任务先持久化为 `pending`，唯一 scheduler-worker 通过短轮询原子认领，进程内队列
   只是同进程的低延迟提示；worker 重启后未认领任务仍可恢复。没有 Redis/Celery 分布式队列，也不允许
   把 scheduler-worker 扩容为多个爬虫副本。

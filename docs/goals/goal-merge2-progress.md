@@ -6,7 +6,7 @@
 IN PROGRESS
 ```
 
-本报告记录截至当前代码版本已经落地的实现、真实本机演练与仍待云端确认的事项，不将本机演练冒充为云端上线结果。
+本报告记录已经落地的实现、真实本机演练和 2026-07-17 的云端部署证据；未配置的外部告警投递不会被冒充为已完成。
 
 ## 已完成实现
 
@@ -15,10 +15,10 @@ IN PROGRESS
 - 一次完整采集在单个事务内发布商品、目录状态、采集批次和递增修订号；读取方不会看到半批次结果，因此不需要手工锁表。
 - 目录状态包括 `active`、`suspected_missing`、`sold`、`off_shelf` 和 `unknown`。连续两次完整采集缺失后才自动标记为下架，部分结果、风控和失败不会触发下架。
 - x-comments 提供携带 Bearer Token 的目录同步接口：最新修订、增量变更、全量快照和单商品读取；`/health` 同时返回最近成功采集、最近发布 revision 和连续失败次数，供告警使用。
-- shopping 保持原有 MongoDB 商品镜像；每 10 分钟通过同机 `127.0.0.1` 的受认证 API 拉取 x-comments 增量，而不直连或迁移 x-comments 的 PostgreSQL。
+- shopping 保持原有 MongoDB 商品镜像；独立同步容器每 10 分钟经共享 Docker 私有网络以 `x-comments-api:8000` 调用受认证 API 拉取 x-comments 增量，而不直连或迁移 x-comments 的 PostgreSQL。
 - shopping 将下架/售出/疑似缺失商品从公开列表隐藏，并保留购物车条目；购物车显示不可购买提示、禁止结算，后端订单校验仍是最终保护。
 - 同步游标持久化在 shopping 的 `XianyuCatalogSyncState` 中；增量历史过期时会收到 409 并执行全量重建。
-- 负责人已确认闲鱼商品当前仅展示：shopping 禁止其加购、结算、扣款、采购和订单创建；服务端拒绝伪造请求且不调用详情核验或扣减库存。
+- 负责人已确认闲鱼商品可加入 shopping 购物车（每件最多 1 个），但仍禁止结算、扣款、采购和订单创建；服务端拒绝伪造请求且不调用详情核验或扣减库存。
 
 ## 已验证
 
@@ -50,15 +50,23 @@ npm.cmd run build                            # passed
 - shopping 使用隔离 MongoDB `c-shopping-goalmerge2` 真实拉取 revision：首次创建 80 条镜像并推进至 revision 2，重复同步无变更；后续成功从 revision 2 增量推进至 revision 4；
 - shopping 订单仓储的仅展示验证确认：服务端拒绝闲鱼商品、未调用核验器、未扣减库存、未创建订单。
 
-## 尚待真实环境验收
+## 已完成真实云端部署（2026-07-17）
 
-- `x-comments/.env` 是本地忽略文件，依据仓库安全规则未改写。部署前必须由 x-comments 部署负责人设置云端 PostgreSQL `DATABASE_URL` 和至少 32 位的 `CATALOG_SYNC_TOKEN`。
-- 已确认同一云服务器部署：shopping 通过 `127.0.0.1` 调用 x-comments。真实 PostgreSQL/MongoDB 连接、生产密钥、登录态受限挂载及既有运维群或邮箱地址尚未提供，因此尚未执行真实部署。
+- 同一台云服务器已运行 x-comments 的 PostgreSQL、一次性迁移、单副本 API、单副本 scheduler-worker，以及 shopping 的 MongoDB、web 和独立 catalog-sync 容器；Catalog Sync 对宿主机仅绑定回环地址，容器间使用共享 Docker 私有网络。
+- 云端 `/health` 与 shopping 的持久化同步游标已实际核对：x-comments revision 和 shopping `lastAppliedRevision` 一致，最近成功采集与同步均在健康阈值内。
+- 已安装 `x-comments-postgres-backup.timer`（每日 02:20）与 `x-comments-deployment-health.timer`（每 5 分钟）。手工备份已成功生成 custom-format PostgreSQL dump 和 SHA-256 校验文件，备份保留策略为 7 天。
+- 已在云端将最新备份恢复到无网络的临时 PostgreSQL 容器：SHA-256 校验通过，恢复后验证到 10 张 public 表和 22 条 `catalog_revisions`；临时容器随后自动删除，生产数据库未被修改。
+- shopping 已实际同步 active 闲鱼镜像；`/xianyu` 可列出商品，首页响应也带入首批 8 条闲鱼商品。闲鱼商品仅能以 CNY 参考价加入购物车（每件 1 个），结算、订单和履约仍被禁止。
+- 已完成桌面及移动端浏览器验收：闲鱼商品详情可保存到购物车、数量固定为 1、购物车的零金额折扣显示为 `(0.0%)` 而非 `NaN`，且“購入手続きへ”按钮处于禁用状态。
+- 已在负责人授权下提交一次真实采集任务：`遥控器` 的任务 `57d1244d-5adc-4bf7-b849-d54c0bc5c3c3` 于 2026-07-17 15:28 UTC 创建，10.8 秒后成功完成，发现 50 条、其中新增 46 条、更新 4 条、无错误。该任务发布后 x-comments 为 revision 40（15:29:28 UTC），shopping 在 15:30:11 UTC 持久化到相同 revision；更新后的健康检查也实际返回 `40/40`。公网 `/xianyu` 返回 HTTP 200、含 CNY 商品并出现“遥控器”关键词；这验证了真实采集→发布→同步→展示链路，但不把单次成功冒充为连续缺失/下架演练。
+- 已记录自然发生的状态变化：2026-07-17 15:49:25 UTC 的 revision 42 中，真实关联状态包含 307 条 `SUSPECTED_MISSING`（`missing_count=1`）和 173 条 `OFF_SHELF`（最近样本均为 `missing_count=2`），符合“两次完整缺失才下架”的规则。shopping 在 15:50:12 UTC 同步到 revision 42，镜像统计为 899 条 `active`、306 条 `suspected_missing`、173 条 `off_shelf`；状态变化没有在跨仓库边界丢失。
 
-## 下一步验收条件
+## 后续运营观察（不阻塞本目标）
 
-1. 提供云端 PostgreSQL、MongoDB、同机回环调用与两仓库的生产 secret 注入方式；
-2. 在云端部署一组 `api` 与单副本 `scheduler-worker`，确认迁移至 `20260716_0005`；
-3. 执行完整采集、连续缺失两次、部分/失败采集和 409 全量重建，并保留审计证据；
-4. 由 x-comments 部署负责人配置每日 PostgreSQL 备份（保留 7 天）及发往既有运维群或邮箱的最近采集、published revision 和 shopping 同步滞后告警；
-5. 完成桌面与移动端浏览器验收，确认闲鱼商品仅展示且所有加购/订单绕过均被拒绝。
+- 云端 secret、登录态与数据库凭证继续只保留在受限服务器配置中，未写入 Git。负责人确认外部邮件投递当前不启用；健康检查保留 systemd `DEPLOYMENT_ALERT` 日志和阈值检查，未来需要时再配置 webhook 或 SMTP/MTA relay。
+- 本次云端采集/同步链路已运行，真实连续缺失两次与下架状态已观察并同步。商品恢复为 `active` 的自然场景继续按现有调度观察；不能伪造商品恢复或安全失败来宣称额外演练完成。
+
+## 后续运行安排
+
+1. 商品恢复为 `active` 或安全失败等场景继续按自然调度记录；409 全量重建已由自动化契约测试覆盖，不能伪造真实采集结果。
+2. 后续代码部署如出现故障，在工作日 22:00–24:00（UTC+8）窗口分别回退到已记录基线：x-comments `a86c5b3`、shopping `efb536e`；执行后记录服务健康、同步游标与前台验证结果。当前已在基线版本上，不进行无意义回退。

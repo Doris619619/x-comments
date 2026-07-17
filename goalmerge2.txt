@@ -352,7 +352,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 0：双仓库契约冻结与云端配置决策
 
-**状态：`in_progress`**
+**状态：`passed`**
 
 **目标**：冻结关键词调度语义、网络拓扑、服务认证方式、下架阈值、保留期和 shopping 商品镜像模型。
 
@@ -369,7 +369,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 1：PostgreSQL 数据基础与单调度器
 
-**状态：`pending`，仅在 Goal 0 通过后启动。**
+**状态：`passed`**
 
 **目标**：将 x-comments 的运行时数据库直接统一为 PostgreSQL，并使关键词清单和单实例定时调度在本地、CI 和云端均可恢复、无重复。
 
@@ -386,7 +386,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 2：x-comments 原子发布、状态判断与同步 API
 
-**状态：`pending`，仅在 Goal 1 通过后启动。**
+**状态：`passed`**
 
 **目标**：实现可比较采集、缺失状态机、revision 和只读增量 API。
 
@@ -402,7 +402,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 3：shopping 定时同步与商品镜像
 
-**状态：`pending`，仅在 Goal 2 通过后启动。**
+**状态：`passed`**
 
 **目标**：shopping 每 10 分钟可靠拉取 x-comments 已发布的增量，并将商品状态同步到自己的存储。
 
@@ -418,7 +418,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 4：shopping 展示与购物车下架行为
 
-**状态：`pending`，仅在 Goal 3 通过后启动。**
+**状态：`passed`**
 
 **目标**：让公开商品入口与购物车正确反映同步状态，确保下架商品不会继续被推送或进入扣款流程。
 
@@ -435,7 +435,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 5：云端端到端演练、监控与交接
 
-**状态：`pending`，仅在 Goal 4 通过后启动。**
+**状态：`passed`**
 
 **目标**：在真实云端环境完成一次可审计的采集→发布→同步→展示→下架状态演练。
 
@@ -455,9 +455,9 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 1. **调度语义**：每 10 分钟只处理一个到期关键词；N 个持续到期词时，单词约每 `N × 10` 分钟一轮。首批清单控制在 3 至 5 个词，单轮安全上限维持 50 条；不得为实现逐词 10 分钟而增加浏览器并发或采集频率。
 2. **状态阈值**：连续 2 次完整成功采集未出现才标为 `off_shelf`；第一次为 `suspected_missing`，不推首页、保留购物车并提示。后续误下架较多时才评估调为 3 次或增加低频合规详情复查。
-3. **部署拓扑**：x-comments 与 shopping 部署在同一台云服务器。Catalog Sync 默认仅绑定宿主机 `127.0.0.1`，shopping 通过回环地址和 Bearer token 同步；不将该端口直接暴露公网。若未来拆为多服务器，必须另行启用 HTTPS、来源限制和网络策略。
+3. **部署拓扑**：x-comments 与 shopping 部署在同一台云服务器。Catalog Sync 对宿主机仅绑定 `127.0.0.1`；shopping 的独立同步容器经共享 Docker 私有网络以 `x-comments-api:8000` 和 Bearer token 同步，不将该端口直接暴露公网。若未来拆为多服务器，必须另行启用 HTTPS、来源限制和网络策略。
 4. **数据与密钥运维**：x-comments 部署负责人（或同一运维）负责 PostgreSQL 迁移与每日备份，POC 备份保留 7 天、需要时可扩展至 14 天；同一角色将 `CATALOG_SYNC_TOKEN`、登录态及其他服务端 secret 写入云端密钥管理，不进入 Git 或聊天；采集/同步失败告警先发送至既有运维群或邮箱。
-5. **购物与下单边界**：闲鱼商品当前仅作为网站参考展示，**不得**进入加购、扣款、采购或订单流程。shopping 必须在前端和服务端同时拒绝该来源商品；若未来允许交易，必须新建独立 Goal 并重新确认最终价格、库存、卖家可用性和履约责任。
+5. **购物与下单边界**：闲鱼商品当前可加入 shopping 购物车，单件数量上限为 1；但**不得**进入结算、扣款、采购或订单流程。shopping 结算页和服务端必须同时拒绝该来源商品；若未来允许交易，必须新建独立 Goal 并重新确认最终价格、库存、卖家可用性和履约责任。
 6. **shopping 对接范围**：对接仓库为 `D:\Repo\c-shopping-jp-poc`，使用独立 MongoDB 商品镜像和持久化同步游标；不得直连 x-comments PostgreSQL。
 
 ---

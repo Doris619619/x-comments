@@ -52,6 +52,11 @@ services:
       RUN_MIGRATIONS: "false"
     volumes:
       - ./storage_state.json:/app/storage_state.json:ro
+    networks:
+      default: {}
+      commerce_internal:
+        aliases:
+          - x-comments-api
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -78,3 +83,8 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  commerce_internal:
+    external: true
+    name: commerce_internal

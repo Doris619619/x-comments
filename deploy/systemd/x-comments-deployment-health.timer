@@ -1,0 +1,11 @@
+[Unit]
+Description=Check x-comments and shopping deployment health every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+Persistent=true
+Unit=x-comments-deployment-health.service
+
+[Install]
+WantedBy=timers.target
