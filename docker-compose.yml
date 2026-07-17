@@ -53,7 +53,7 @@ services:
     volumes:
       - ./storage_state.json:/app/storage_state.json:ro
     networks:
-      - default
+      default: {}
       commerce_internal:
         aliases:
           - x-comments-api
