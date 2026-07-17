@@ -3,7 +3,7 @@
 ## 审计结论
 
 ```text
-GOAL 0–4 ACCEPTED — GOAL 5 EXTERNAL ALERT, LIVE STATE-CHANGE AND APPROVED ROLLBACK DRILL PENDING
+GOAL 0–4 ACCEPTED — GOAL 5 LIVE STATE-CHANGE OBSERVATION PENDING
 ```
 
 代码实现、离线测试、真实本机 PostgreSQL 和 2026-07-17 的同机云端部署均已有证据：迁移、单 worker、目录同步、首次备份和健康检查已实际完成。本文件仍不把“仅 systemd 日志告警”标为外部告警已通过，也不伪造连续缺失或风控失败来完成状态演练。
@@ -51,7 +51,7 @@ GOAL 0–4 ACCEPTED — GOAL 5 EXTERNAL ALERT, LIVE STATE-CHANGE AND APPROVED RO
 
 已记录真实云端部署、revision 与 shopping 游标一致、首次 PostgreSQL 备份、隔离恢复和健康检查通过。负责人已授权并配合完成一次真实采集：任务 `57d1244d-5adc-4bf7-b849-d54c0bc5c3c3`（`遥控器`）成功发现 50 条、写入 46 条新增和 4 条更新；x-comments 在 15:29:28 UTC 发布 revision 40，shopping 在 15:30:11 UTC 持久化到 revision 40，更新后的健康检查实际返回 `40/40`。随后公网商城 `/xianyu` 返回 HTTP 200、带 CNY 商品且含该关键词。
 
-该结果证明采集→发布→同步/展示链路可用，但不等同于状态变化演练。健康检查已支持 webhook 和本机 MTA 收件人；当前服务器未安装 `sendmail`，所以尚未写入收件人或声称外发邮件成功。后续只应在真实业务数据出现连续缺失、恢复或安全失败时记录状态变化；还需配置可投递的外部告警，并在取得负责人批准后演练实际代码回滚。
+该结果证明采集→发布→同步/展示链路可用，但不等同于状态变化演练。负责人确认外部邮件投递暂不启用；健康检查继续以 systemd `DEPLOYMENT_ALERT` 日志和阈值检查运行。回滚基线已固定为 x-comments `a86c5b3`、shopping `efb536e`，窗口为工作日 22:00–24:00（UTC+8）；当前服务器已经运行这些基线，所以不执行无意义回退。后续只应在真实业务数据出现连续缺失、恢复或安全失败时记录状态变化。
 
 ## 当前可重复命令
 
