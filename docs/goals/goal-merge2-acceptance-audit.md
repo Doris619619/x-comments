@@ -28,7 +28,7 @@ CLOUD DEPLOYED — EXTERNAL ALERT DELIVERY AND STATE-CHANGE DRILL PENDING
 - PostgreSQL 并发集成测试及本机容器竞争演练均验证两个 scheduler 对同一关键词只能创建一条进行中任务；
 - scheduler-worker 重启后成功恢复，已发布 revision 与成功任务记录仍在。
 
-云端证据：迁移、每日 PostgreSQL 备份 timer 和每 5 分钟健康检查 timer 已部署；已手工成功生成一次带 SHA-256 校验的 PostgreSQL 逻辑备份。外部 webhook 告警和回滚演练仍待完成。
+云端证据：迁移、每日 PostgreSQL 备份 timer 和每 5 分钟健康检查 timer 已部署；已手工成功生成一次带 SHA-256 校验的 PostgreSQL 逻辑备份，并将其恢复到无网络临时 PostgreSQL 容器，验证到 10 张 public 表和 22 条 `catalog_revisions` 后自动清理。外部 webhook 告警和经负责人批准的生产代码回滚演练仍待完成。
 
 ## Goal 2：代码已准备，真实数据库契约未验收
 
@@ -45,11 +45,11 @@ CLOUD DEPLOYED — EXTERNAL ALERT DELIVERY AND STATE-CHANGE DRILL PENDING
 - `xianyu:revision-sync:verify`、`xianyu:sync:verify`、`xianyu:contract:verify`、lint 和 production build 已通过；
 - 本机隔离 MongoDB 已真实同步 x-comments revision，第二次以持久化游标无变更完成；仅展示订单请求被服务端拒绝。
 
-云端证据：shopping 持久化游标已与 x-comments published revision 实际一致；独立 catalog-sync 容器继续按 10 分钟运行。断网重试、状态切换与桌面/移动端浏览器验收仍待完成。
+云端证据：shopping 持久化游标已与 x-comments published revision 实际一致；独立 catalog-sync 容器继续按 10 分钟运行。桌面/移动端浏览器已验证可加购、数量固定为 1、零金额折扣显示为 `(0.0%)` 且结算按钮禁用。断网重试与真实状态切换仍待完成。
 
 ## Goal 5：已开始，尚未完全验收
 
-已记录真实云端部署、revision 与 shopping 游标一致、首次 PostgreSQL 备份和健康检查通过。后续只应在真实业务数据出现相应事件时记录状态变化；还需配置外部告警 webhook、演练回滚，并完成桌面/移动端的加购与禁止结算验证。
+已记录真实云端部署、revision 与 shopping 游标一致、首次 PostgreSQL 备份、隔离恢复和健康检查通过。后续只应在真实业务数据出现相应事件时记录状态变化；还需配置外部告警 webhook，并在取得负责人批准后演练实际代码回滚。
 
 ## 当前可重复命令
 

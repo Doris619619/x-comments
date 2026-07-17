@@ -23,8 +23,20 @@ sudo ls -l /var/backups/x-comments/postgresql
 ```
 
 恢复演练必须在隔离 PostgreSQL 实例进行；不得把生产备份导入 shopping MongoDB，也不得在未确认的
-生产库执行 `pg_restore --clean`。需要 14 天保留时，只修改 systemd service 的 `RETENTION_DAYS=14` 并
-`daemon-reload` 后重启 timer。
+生产库执行 `pg_restore --clean`。仓库提供如下检查脚本：它会校验最新 dump 的 SHA-256，将 dump 恢复到
+无网络的临时 `postgres:16-alpine` 容器，检查 public 表和 `catalog_revisions`，并始终删除临时容器。
+
+```bash
+cd /home/ubuntu/opt/x-comments
+sudo bash scripts/verify_postgres_backup_restore.sh
+# 预期：isolated_restore=passed tables=<正数> catalog_revisions=<非负整数> dump=<文件名>
+```
+
+这是“备份可恢复”演练，不是生产回滚。生产出现需要回滚的故障时，必须先取得值班负责人批准、选定明确的
+Git 提交和经过校验的备份；随后分别按两个仓库的 Compose 文档回退服务，先验证 `/health`、shopping 同步
+游标与前台页面，再决定是否恢复生产 PostgreSQL。不得为了演练在业务运行期间直接 `pg_restore --clean`。
+
+需要 14 天保留时，只修改 systemd service 的 `RETENTION_DAYS=14` 并 `daemon-reload` 后重启 timer。
 
 ## 健康检查与告警
 
