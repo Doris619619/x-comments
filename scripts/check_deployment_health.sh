@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 本脚本负责检查 x-comments 采集发布、shopping 同步和公开站点的运行新鲜度。
-# 它不创建采集任务、不改写数据库；若配置 ALERT_WEBHOOK_URL，失败时只发送脱敏文本告警。
+# 它不创建采集任务、不改写数据库；若配置 webhook 或本机 MTA 收件人，失败时只发送脱敏文本告警。
 
 set -Eeuo pipefail
 
@@ -10,19 +10,45 @@ shopping_database="${SHOPPING_MONGO_DATABASE:-choiceshop}"
 max_crawl_age_seconds="${MAX_CRAWL_AGE_SECONDS:-1800}"
 max_sync_age_seconds="${MAX_SYNC_AGE_SECONDS:-1800}"
 alert_webhook_url="${ALERT_WEBHOOK_URL:-}"
+alert_email_to="${ALERT_EMAIL_TO:-}"
 
-notify() {
+# 通过服务器已配置的 sendmail 兼容 MTA 发送脱敏的纯文本告警。
+# 参数：$1 为告警文本。
+# 返回：未配置收件人或成功投递时返回 0；发送器不存在或投递失败时记录日志但不覆盖健康检查失败原因。
+send_email_alert() {
   local message="$1"
-  echo "DEPLOYMENT_ALERT: $message" >&2
-  if [[ -z "$alert_webhook_url" ]]; then
+  if [[ -z "$alert_email_to" ]]; then
+    return 0
+  fi
+  if [[ "$alert_email_to" == *$'\n'* || "$alert_email_to" == *$'\r'* || "$alert_email_to" != *@* ]]; then
+    echo 'DEPLOYMENT_ALERT: ALERT_EMAIL_TO 格式无效，未投递邮件告警' >&2
+    return 0
+  fi
+  if ! command -v sendmail >/dev/null 2>&1; then
+    echo 'DEPLOYMENT_ALERT: 未找到 sendmail，未投递邮件告警' >&2
     return 0
   fi
 
-  local payload
-  payload="$(printf '%s' "$message" | python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))')"
-  curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
-    -H 'Content-Type: application/json' --data "$payload" "$alert_webhook_url" >/dev/null || \
-    echo 'DEPLOYMENT_ALERT: 告警 webhook 投递失败' >&2
+  if ! printf 'To: %s\nSubject: [x-comments] deployment alert\nContent-Type: text/plain; charset=UTF-8\n\n%s\n' \
+    "$alert_email_to" "$message" | sendmail -t; then
+    echo 'DEPLOYMENT_ALERT: 邮件告警投递失败' >&2
+  fi
+}
+
+# 将同一告警写入日志，并按已配置渠道尽力投递。
+# 参数：$1 为不含密钥、Cookie 或数据库凭证的告警文本。
+# 副作用：可能调用 webhook 或本机 MTA；投递失败不会吞掉原始健康检查失败。
+notify() {
+  local message="$1"
+  echo "DEPLOYMENT_ALERT: $message" >&2
+  if [[ -n "$alert_webhook_url" ]]; then
+    local payload
+    payload="$(printf '%s' "$message" | python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))')"
+    curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
+      -H 'Content-Type: application/json' --data "$payload" "$alert_webhook_url" >/dev/null || \
+      echo 'DEPLOYMENT_ALERT: 告警 webhook 投递失败' >&2
+  fi
+  send_email_alert "$message"
 }
 
 fail() {
