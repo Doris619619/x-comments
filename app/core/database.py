@@ -5,7 +5,6 @@
 """
 
 from collections.abc import Generator
-from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -26,13 +25,12 @@ def build_engine(database_url: str) -> Engine:
     """
     根据数据库 URL 创建同步 SQLAlchemy 引擎。
 
-    SQLite 文件 URL 会先创建父目录；无效 URL 会抛出 SQLAlchemy 异常。
+    PostgreSQL URL 会创建同步引擎；非 PostgreSQL 或无效 URL 会抛出 ValueError/SQLAlchemy 异常。
     """
 
-    if database_url.startswith("sqlite:///./"):
-        Path(database_url.removeprefix("sqlite:///./")).parent.mkdir(parents=True, exist_ok=True)
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    return create_engine(database_url, connect_args=connect_args, pool_pre_ping=True)
+    if not database_url.startswith("postgresql+psycopg://"):
+        raise ValueError("运行时仅支持 PostgreSQL psycopg 连接串")
+    return create_engine(database_url, pool_pre_ping=True)
 
 
 engine = build_engine(get_settings().database_url)

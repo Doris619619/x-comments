@@ -7,7 +7,8 @@
 → REST API → POC 页面展示真实商品
 ```
 
-当前默认关键词为“女生发饰”。项目不保证全量覆盖，不实现每 5 分钟调度、商品售出/下架复查、多账号、代理池、验证码处理或正式用户前端。
+当前默认关键词为“女生发饰”。项目不保证全量覆盖；定时采集每 10 分钟只调度一个到期清单词，
+不实现多账号、代理池、验证码处理或正式用户前端。
 
 ## 安全规则
 
@@ -35,6 +36,10 @@ python -m playwright install chromium
 cp .env.example .env
 ```
 
+本阶段运行时统一使用 PostgreSQL。请在 `.env` 中设置 `POSTGRES_PASSWORD`，并使
+`DATABASE_URL` 指向 PostgreSQL；不得继续使用旧的 SQLite URL。真实 `.env`、数据库密码和
+登录态均不得提交。
+
 当前闲鱼会拦截 Playwright 无头模式，真实任务需设置：
 
 ```text
@@ -53,7 +58,10 @@ python -m scripts.login_xianyu
 
 ```bash
 python -m alembic upgrade head
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 终端 A：只提供 API，不启动 Playwright
+APP_ROLE=api python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 终端 B：唯一的 scheduler-worker，负责持久化任务和 10 分钟调度
+APP_ROLE=scheduler_worker python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
 访问：
@@ -74,9 +82,10 @@ Compose 会：
 
 1. 构建包含 Playwright Chromium 的镜像；
 2. 把本地 `storage_state.json` 只读挂载进容器；
-3. 创建项目专属 `app_data` named volume 持久化 SQLite；
-4. 启动时自动执行 `alembic upgrade head`；
-5. 在 `0.0.0.0:8000` 启动 API 和 POC 页面。
+3. 启动 PostgreSQL 16，并以 `postgres_data` named volume 持久化数据库；
+4. 由一次性 `migrate` 服务执行 `alembic upgrade head`，成功后 API 和 worker 才启动；
+5. 在 `127.0.0.1:8000` 启动仅 API 服务；同机的 shopping 服务通过回环地址同步目录，端口不直接暴露到公网；
+6. 启动恰好一个不暴露端口的 `scheduler-worker`，负责 Playwright 与 10 分钟调度。
 
 停止：
 
@@ -95,6 +104,9 @@ docker compose down
 - `GET /api/v1/crawl-jobs/{job_id}`
 - `GET /api/v1/items`
 - `GET /api/v1/items/{item_id}`
+- `GET /api/v1/catalog-sync/revisions/latest`（shopping 服务端 Bearer 认证）
+- `GET /api/v1/catalog-sync/changes`（shopping 增量同步）
+- `GET /api/v1/catalog-sync/items`（游标失效后的分页全量重建）
 
 完整请求/响应见 [docs/api.md](docs/api.md)。
 
@@ -107,10 +119,14 @@ python -m mypy app
 python -m scripts.check_chinese_docstrings
 ```
 
-自动测试使用内存 SQLite 和脱敏 fixture，不访问真实闲鱼。
+单元测试使用隔离 ORM 数据库和脱敏 fixture，不访问真实闲鱼；`pytest -m postgresql` 是仅在
+PostgreSQL 已迁移的集成环境运行的并发约束验证。Docker 引擎未运行时无法完成容器级
+PostgreSQL 验收。
 
 ## 数据和限制
 
 数据模型见 [docs/data-model.md](docs/data-model.md)，架构见 [docs/architecture.md](docs/architecture.md)，风险与限制见 [docs/known-limitations.md](docs/known-limitations.md)。
 
-当前真实验收只覆盖最多 3 页或 50 条商品。搜索结果未出现不能证明商品已售出或下架；本 POC 不会据此删除或隐藏历史商品。
+当前真实验收只覆盖最多 3 页或 50 条商品。搜索结果未出现不能直接证明商品已售出或下架：
+仅完整成功采集会计入缺失，首次缺失为 `suspected_missing`，连续两次完整缺失才为
+`off_shelf`。shopping 必须通过 Catalog Sync revision 同步，不得因网络失败或同步失败批量下架。

@@ -28,6 +28,8 @@ class CatalogKeyword(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     last_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(

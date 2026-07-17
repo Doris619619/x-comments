@@ -36,6 +36,9 @@ app = ["static/*.html", "static/*.js", "static/*.css"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "postgresql: 需要已经运行且已执行 Alembic 迁移的 PostgreSQL 集成环境",
+]
 
 [tool.ruff]
 line-length = 100

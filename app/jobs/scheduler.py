@@ -7,6 +7,7 @@
 import asyncio
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.jobs.worker import CrawlWorker
@@ -81,12 +82,19 @@ class CatalogScheduler:
         """
 
         now = datetime.now().astimezone()
-        with self.session_factory() as session:
-            catalog_repository = CatalogKeywordRepository(session)
-            config = catalog_repository.get_next_due(now)
-            if config is None:
-                return None
-            job = JobRepository(session).create(config.keyword)
-            catalog_repository.mark_scheduled(config.id, now)
+        try:
+            with self.session_factory() as session:
+                catalog_repository = CatalogKeywordRepository(session)
+                job_repository = JobRepository(session)
+                config = catalog_repository.get_next_due(
+                    now, job_repository.list_inflight_keywords()
+                )
+                if config is None:
+                    return None
+                job = job_repository.create(config.keyword, commit=False)
+                catalog_repository.mark_scheduled(config.id, now, commit=False)
+                session.commit()
+        except IntegrityError:
+            return None
         self.worker.enqueue(job.job_id)
         return job.job_id
