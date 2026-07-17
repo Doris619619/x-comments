@@ -3,11 +3,10 @@
 ## 审计结论
 
 ```text
-NOT READY FOR CLOUD ACCEPTANCE
+CLOUD DEPLOYED — EXTERNAL ALERT DELIVERY AND STATE-CHANGE DRILL PENDING
 ```
 
-代码实现、离线测试、真实本机 PostgreSQL、两服务运行和重启恢复已具备证据；云端部署所需
-策略已经确认，但尚未拿到生产 secret、数据库连接和告警地址执行部署。本文件不把本机演练误标为云端上线通过。
+代码实现、离线测试、真实本机 PostgreSQL 和 2026-07-17 的同机云端部署均已有证据：迁移、单 worker、目录同步、首次备份和健康检查已实际完成。本文件仍不把“仅 systemd 日志告警”标为外部告警已通过，也不伪造连续缺失或风控失败来完成状态演练。
 
 ## Goal 0：决策已确认
 
@@ -29,7 +28,7 @@ NOT READY FOR CLOUD ACCEPTANCE
 - PostgreSQL 并发集成测试及本机容器竞争演练均验证两个 scheduler 对同一关键词只能创建一条进行中任务；
 - scheduler-worker 重启后成功恢复，已发布 revision 与成功任务记录仍在。
 
-缺失证据：云端 PostgreSQL 的迁移、备份、监控与部署回滚尚未执行。
+云端证据：迁移、每日 PostgreSQL 备份 timer 和每 5 分钟健康检查 timer 已部署；已手工成功生成一次带 SHA-256 校验的 PostgreSQL 逻辑备份。外部 webhook 告警和回滚演练仍待完成。
 
 ## Goal 2：代码已准备，真实数据库契约未验收
 
@@ -46,12 +45,11 @@ NOT READY FOR CLOUD ACCEPTANCE
 - `xianyu:revision-sync:verify`、`xianyu:sync:verify`、`xianyu:contract:verify`、lint 和 production build 已通过；
 - 本机隔离 MongoDB 已真实同步 x-comments revision，第二次以持久化游标无变更完成；仅展示订单请求被服务端拒绝。
 
-缺失证据：云端 10 分钟同步、断网重试、状态切换与桌面/移动端浏览器验收尚未执行。
+云端证据：shopping 持久化游标已与 x-comments published revision 实际一致；独立 catalog-sync 容器继续按 10 分钟运行。断网重试、状态切换与桌面/移动端浏览器验收仍待完成。
 
-## Goal 5：尚未开始真实云端演练
+## Goal 5：已开始，尚未完全验收
 
-必须在负责人提供云端 PostgreSQL、MongoDB、同机回环调用、secret、告警和登录态挂载方式后，记录真实采集、
-revision 发布、shopping 同步、状态变化、重启恢复和最终 Git 秘密审查结果。
+已记录真实云端部署、revision 与 shopping 游标一致、首次 PostgreSQL 备份和健康检查通过。后续只应在真实业务数据出现相应事件时记录状态变化；还需配置外部告警 webhook、演练回滚，并完成桌面/移动端的加购与禁止结算验证。
 
 ## 当前可重复命令
 
