@@ -90,8 +90,8 @@ PostgreSQL 容器并使用 `postgres_data` volume。配置示例见 `.env.exampl
 结算核验超时由 `XIANYU_VERIFY_TIMEOUT_SECONDS` 配置，默认 12 秒，必须短于商城侧 HTTP
 超时。`XIANYU_API_TOKEN` 是商城服务器与本服务共享的至少 32 字符随机令牌；未配置时核验接口返回
 503，不允许匿名降级。`CATALOG_SYNC_TOKEN` 是单独的只读同步令牌；示例值只在
-`.env.example`，真实值不得提交。当前两服务部署在同一台云服务器：Catalog Sync 仅绑定宿主机
-回环地址；若未来拆分服务器，才必须改为 HTTPS、来源限制和服务间认证。`APP_ROLE` 只能为 `api` 或 `scheduler_worker`：云端可扩容 API，
+`.env.example`，真实值不得提交。当前两服务部署在同一台云服务器：Catalog Sync 对宿主机仅绑定
+回环地址，shopping 的独立同步容器通过内部 Docker 网络的 `x-comments-api` 服务名访问；若未来拆分服务器，才必须改为 HTTPS、来源限制和服务间认证。`APP_ROLE` 只能为 `api` 或 `scheduler_worker`：云端可扩容 API，
 但只能部署一个 scheduler-worker；该 worker 同时持有唯一 Playwright 队列和定时调度职责。
 
 ## 安全边界
