@@ -1,5 +1,7 @@
 # Goal 4 报告：POC 容器化交付
 
+> 本文是 Goal 4 阶段的历史报告，记录当时的 SQLite POC 验收结果。当前跨仓库同步、PostgreSQL、定时调度与容器启动方式以 `docs/goals/goal-merge2-progress.md`、`docs/architecture.md` 和 `goalmerge2.txt` 为准。
+
 ## 目标与最终状态
 
 让另一位工程师可以从全新容器数据库启动、访问并使用完整 POC。

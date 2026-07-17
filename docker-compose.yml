@@ -1,28 +1,80 @@
-# 本文件定义单容器 POC、本地 SQLite 持久化和只读登录态挂载。
+# 本文件定义 PostgreSQL、一次性迁移、API 与单个 scheduler-worker 的同机部署拓扑。
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-xcomments}:${POSTGRES_PASSWORD:?请在 .env 中设置 PostgreSQL 密码}@postgres:5432/${POSTGRES_DB:-x_comments}
+  XIANYU_STORAGE_STATE_PATH: /app/storage_state.json
+  XIANYU_HEADLESS: "false"
+  XIANYU_MAX_PAGES: "3"
+  XIANYU_MAX_ITEMS: "50"
+  XIANYU_PAGE_DELAY_SECONDS: "2.0"
+  XIANYU_VERIFY_TIMEOUT_SECONDS: "12"
+  XIANYU_API_TOKEN: "${XIANYU_API_TOKEN:-}"
+  CATALOG_SYNC_TOKEN: "${CATALOG_SYNC_TOKEN:-}"
+  CATALOG_MISSING_THRESHOLD: "${CATALOG_MISSING_THRESHOLD:-2}"
+  CATALOG_SCHEDULER_INTERVAL_SECONDS: "${CATALOG_SCHEDULER_INTERVAL_SECONDS:-600}"
+  WORKER_POLL_SECONDS: "${WORKER_POLL_SECONDS:-5}"
+  LOG_LEVEL: INFO
+
 services:
-  app:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-x_comments}
+      POSTGRES_USER: ${POSTGRES_USER:-xcomments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 PostgreSQL 密码}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    environment:
+      <<: *app-environment
+      RUN_MIGRATIONS: "true"
+      MIGRATE_ONLY: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
     build: .
     ports:
-      - "8000:8000"
+      # shopping 与 x-comments 部署在同一台服务器，Catalog Sync 只需宿主机回环访问。
+      - "127.0.0.1:8000:8000"
     environment:
-      DATABASE_URL: sqlite:////app/data/app.sqlite3
-      XIANYU_STORAGE_STATE_PATH: /app/storage_state.json
-      XIANYU_HEADLESS: "false"
-      XIANYU_MAX_PAGES: "3"
-      XIANYU_MAX_ITEMS: "50"
-      XIANYU_PAGE_DELAY_SECONDS: "2.0"
-      XIANYU_VERIFY_TIMEOUT_SECONDS: "12"
-      XIANYU_API_TOKEN: "${XIANYU_API_TOKEN:-}"
-      LOG_LEVEL: INFO
+      <<: *app-environment
+      APP_ROLE: api
+      RUN_MIGRATIONS: "false"
     volumes:
-      - app_data:/app/data
       - ./storage_state.json:/app/storage_state.json:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
+
+  scheduler-worker:
+    build: .
+    environment:
+      <<: *app-environment
+      APP_ROLE: scheduler_worker
+      RUN_MIGRATIONS: "false"
+    volumes:
+      - ./storage_state.json:/app/storage_state.json:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
-  app_data:
+  postgres_data:

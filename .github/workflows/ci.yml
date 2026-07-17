@@ -1,0 +1,44 @@
+name: x-comments CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: x_comments_test
+          POSTGRES_USER: xcomments
+          POSTGRES_PASSWORD: xcomments-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xcomments -d x_comments_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://xcomments:xcomments-test-password@127.0.0.1:5432/x_comments_test
+      POSTGRES_TEST_URL: postgresql+psycopg://xcomments:xcomments-test-password@127.0.0.1:5432/x_comments_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖
+        run: python -m pip install -e ".[dev]"
+      - name: 执行 PostgreSQL 迁移
+        run: python -m alembic upgrade head
+      - name: 运行快速单元测试
+        run: python -m pytest -q -m "not postgresql"
+      - name: 运行 PostgreSQL 并发集成测试
+        run: python -m pytest -q -m postgresql
+      - name: 静态检查
+        run: |
+          python -m ruff check .
+          python -m mypy app
+          python -m scripts.check_chinese_docstrings

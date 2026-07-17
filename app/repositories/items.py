@@ -29,6 +29,7 @@ class UpsertStats:
     new: int
     updated: int
     duplicate: int
+    seen_item_ids: frozenset[str]
 
 
 class ItemRepository:
@@ -48,12 +49,20 @@ class ItemRepository:
         self.session = session
 
     def upsert_many(
-        self, keyword_value: str, items: list[ParsedItem], seen_at: datetime
+        self,
+        keyword_value: str,
+        items: list[ParsedItem],
+        seen_at: datetime,
+        *,
+        commit: bool = True,
     ) -> UpsertStats:
         """
         按商品 ID 写入或更新商品，并维护关键词关联。
 
-        输入关键词、商品和观察时间；返回统计；数据库错误回滚后向上抛出。
+        输入关键词、商品、观察时间与是否提交；返回统计；数据库错误回滚后向上抛出。
+
+        当 commit 为 False 时，调用方必须在同一会话中提交或回滚，用于把商品写入和
+        Catalog revision 发布合并成一个短事务。
         """
 
         normalized = keyword_value.casefold().strip()
@@ -118,11 +127,12 @@ class ItemRepository:
                     )
                 else:
                     link.last_seen_at = seen_at
-            self.session.commit()
+            if commit:
+                self.session.commit()
         except Exception:
             self.session.rollback()
             raise
-        return UpsertStats(len(items), new, updated, duplicate)
+        return UpsertStats(len(items), new, updated, duplicate, frozenset(seen_ids))
 
     def list_page(
         self, page: int, page_size: int, keyword: str | None, category: str | None = None

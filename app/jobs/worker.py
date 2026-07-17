@@ -13,8 +13,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.crawler.client import XianyuCrawler
 from app.crawler.risk_control import RiskControlBlocked
+from app.models.catalog_sync import CrawlRunStatus
 from app.models.crawl_job import CrawlJob, CrawlJobStatus, utc_now
-from app.repositories.items import ItemRepository
+from app.repositories.catalog_sync import CatalogSyncRepository
+from app.repositories.jobs import JobRepository
 
 
 class CrawlWorker:
@@ -37,6 +39,7 @@ class CrawlWorker:
         """
 
         self.session_factory = session_factory
+        self.settings = settings
         self.crawler = XianyuCrawler(settings, account_lock)
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.task: asyncio.Task[None] | None = None
@@ -81,11 +84,32 @@ class CrawlWorker:
         """
 
         while True:
-            job_id = await self.queue.get()
+            queued_job = False
+            job_id: str | None
+            try:
+                job_id = await asyncio.wait_for(
+                    self.queue.get(), timeout=self.settings.worker_poll_seconds
+                )
+                queued_job = True
+            except TimeoutError:
+                job_id = self._find_oldest_pending_job_id()
+            if job_id is None:
+                continue
             try:
                 await self._execute(job_id)
             finally:
-                self.queue.task_done()
+                if queued_job:
+                    self.queue.task_done()
+
+    def _find_oldest_pending_job_id(self) -> str | None:
+        """
+        从持久化队列读取一个待认领任务，支持 API 与 worker 独立部署后的重启恢复。
+
+        无输入；返回候选任务 ID 或 None；实际认领在执行前原子完成，因此本方法不产生状态写入。
+        """
+
+        with self.session_factory() as session:
+            return JobRepository(session).find_oldest_pending_job_id()
 
     async def _execute(self, job_id: str) -> None:
         """
@@ -94,14 +118,20 @@ class CrawlWorker:
         输入任务 ID；内部捕获任务错误；副作用为有限网络访问和数据库更新。
         """
 
-        with self.session_factory() as session:
-            job = session.get(CrawlJob, job_id)
-            if job is None or job.status is not CrawlJobStatus.PENDING:
-                return
-            job.status = CrawlJobStatus.RUNNING
-            job.started_at = utc_now()
-            session.commit()
-            keyword = job.keyword
+        try:
+            with self.session_factory() as session:
+                job = JobRepository(session).claim_pending_job(job_id)
+                if job is None:
+                    return
+                started_at = job.started_at
+                if started_at is None:
+                    raise ValueError("已认领任务缺少开始时间")
+                keyword = job.keyword
+                run = CatalogSyncRepository(session).begin_run(job_id, keyword, started_at)
+                run_id = run.run_id
+        except Exception as exc:
+            self._finish_error(job_id, CrawlJobStatus.FAILED, f"采集启动失败：{type(exc).__name__}")
+            return
         try:
             result = await asyncio.wait_for(
                 self.crawler.collect(keyword),
@@ -109,7 +139,24 @@ class CrawlWorker:
             )
             seen_at = datetime.now().astimezone()
             with self.session_factory() as session:
-                stats = ItemRepository(session).upsert_many(keyword, result.items, seen_at)
+                catalog_repository = CatalogSyncRepository(session)
+                if result.errors:
+                    stats = catalog_repository.finish_incomplete_run(
+                        run_id,
+                        keyword,
+                        result.items,
+                        seen_at,
+                        "; ".join(result.errors[:5]) or None,
+                    )
+                else:
+                    published = catalog_repository.publish_complete_run(
+                        run_id,
+                        keyword,
+                        result.items,
+                        seen_at,
+                        self.settings.catalog_missing_threshold,
+                    )
+                    stats = published.stats
                 job = session.get(CrawlJob, job_id)
                 if job is None:
                     return
@@ -152,4 +199,15 @@ class CrawlWorker:
             job.error_count += 1
             job.error_message = message[:1000]
             job.finished_at = utc_now()
+            run_status = (
+                CrawlRunStatus.BLOCKED
+                if status is CrawlJobStatus.BLOCKED
+                else CrawlRunStatus.FAILED
+            )
+            CatalogSyncRepository(session).finish_failed_run(
+                job_id,
+                run_status,
+                message,
+                job.finished_at,
+            )
             session.commit()

@@ -4,7 +4,10 @@
 它属于 tests 基础设施，不访问真实网络或登录态。
 """
 
+import os
 from collections.abc import Generator
+
+os.environ["DATABASE_URL"] = "postgresql+psycopg://xcomments:xcomments@127.0.0.1:5432/x_comments"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,7 +46,10 @@ def client(session_factory: sessionmaker[Session]) -> Generator[TestClient, None
     输入内存会话工厂，返回客户端；请求错误由测试断言；不访问外部网络。
     """
 
-    application = create_app(verification_token="offline-test-token-0123456789abcdef")
+    application = create_app(
+        verification_token="offline-test-token-0123456789abcdef",
+        catalog_sync_token="offline-sync-token-0123456789abcdef",
+    )
 
     def override_db() -> Generator[Session, None, None]:
         """为一次测试请求提供内存会话，并在结束时关闭。"""

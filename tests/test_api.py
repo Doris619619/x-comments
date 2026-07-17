@@ -23,7 +23,16 @@ def test_health_and_openapi(client: TestClient) -> None:
     输入测试客户端；断言失败抛出 AssertionError；只执行内存查询。
     """
 
-    assert client.get("/health").json() == {"status": "ok", "database": "ok"}
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json() == {
+        "status": "ok",
+        "database": "ok",
+        "last_successful_crawl_at": None,
+        "last_published_revision": 0,
+        "last_published_at": None,
+        "consecutive_failed_runs": 0,
+    }
     schema = client.get("/openapi.json")
     assert schema.status_code == 200
     assert "/api/v1/crawl-jobs" in schema.json()["paths"]

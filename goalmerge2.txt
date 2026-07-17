@@ -24,14 +24,17 @@ c-shopping-jp-poc      商城展示、购物车和订单侧的本地同步消费
 
 ## 2. 已确认的核心结论
 
-### 2.1 不共享 SQLite 文件，不让 shopping 直接读 x-comments 数据库
+### 2.1 从第一阶段起直接使用 PostgreSQL；shopping 不直接读库
 
-云端部署后，`x-comments` 独占自己的数据库和表结构。shopping **不得**挂载、复制、轮询或直接连接 `x-comments` 的 SQLite/PostgreSQL 数据库。
+本阶段不再采用 SQLite 作为运行时数据库。开发、测试集成环境和云端部署均以 PostgreSQL 为唯一目标数据库；本地通过 Docker Compose 或受控的开发 PostgreSQL 实例启动。
+
+`x-comments` 独占自己的 PostgreSQL 数据库、schema 和迁移。shopping 保留其既有 MongoDB
+交易目录和迁移；shopping **不得**使用 x-comments 的数据库账号、schema、表或只读连接来同步商品。
 
 跨仓库边界固定为：
 
 ```text
-x-comments 自己写 PostgreSQL
+x-comments PostgreSQL（唯一写入方）
        ↓ HTTPS + 服务间认证
 Catalog 同步 API（只读、版本化）
        ↓
@@ -42,15 +45,20 @@ shopping 服务端定时拉取并写入自己的商品镜像
 
 - 两个服务的部署、迁移和回滚不会互相破坏；
 - shopping 不依赖采集库的内部表结构；
-- 云端不需要共享 SQLite 文件系统或数据库写锁；
+- 两个服务不需要共享数据库文件、schema 或表级写锁；
 - 可以为 shopping 只暴露最小字段和稳定版本契约；
 - 采集服务故障时，shopping 仍可用上一次已完成同步的商品镜像。
 
-生产环境数据库使用 PostgreSQL。本地开发可以继续使用 SQLite，但 SQLite 只用于单服务本地开发与测试，不能作为两个云端服务之间的集成方式。
+PostgreSQL 是从本阶段起的唯一运行时数据库选择：
+
+- `x-comments` 使用独立 PostgreSQL 数据库，例如 `x_comments`；
+- shopping 保留独立 MongoDB 商品镜像，不做超出本目标范围的全库 PostgreSQL 迁移；
+- 两者只通过 HTTPS Catalog Sync API 交接数据；
+- 本地开发、CI 集成测试和云端部署均提供 PostgreSQL 服务或连接串；不得将 SQLite 作为兼容分支、共享文件或生产降级方案。
 
 ### 2.2 不在整个爬取期间“锁数据库”
 
-Playwright 访问页面、等待响应、解析和去重期间，不能持有数据库写锁。一次爬取可能持续较久，遇到超时或风控还可能失败；若全程锁库，会使读取被阻塞并提高 SQLite/PostgreSQL 锁冲突风险。
+Playwright 访问页面、等待响应、解析和去重期间，不能持有数据库写锁。一次爬取可能持续较久，遇到超时或风控还可能失败；若全程锁库，会使读取被阻塞并提高 PostgreSQL 锁冲突和连接耗尽风险。
 
 正确的发布模型：
 
@@ -110,7 +118,7 @@ Playwright 访问页面、等待响应、解析和去重期间，不能持有数
                     │                                    │
 登录态（机密挂载） ──→ 单实例 scheduler / worker             │
                     │        ↓ Playwright                 │
-                    │   PostgreSQL（唯一写入方）            │
+                    │   x-comments PostgreSQL（唯一写入方） │
                     │        ↓ 原子发布 revision           │
                     │   只读 Catalog Sync API             │
                     └───────────────┬────────────────────┘
@@ -120,7 +128,7 @@ Playwright 访问页面、等待响应、解析和去重期间，不能持有数
                     │ shopping                             │
                     │  每 10 分钟服务端同步任务             │
                     │        ↓                             │
-                    │  本地商品镜像 + 同步游标              │
+                    │  shopping MongoDB + 同步游标          │
                     │        ↓                             │
                     │  首页仅 active；购物车保留下架条目     │
                     └────────────────────────────────────┘
@@ -344,7 +352,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 0：双仓库契约冻结与云端配置决策
 
-**状态：`pending`**
+**状态：`in_progress`**
 
 **目标**：冻结关键词调度语义、网络拓扑、服务认证方式、下架阈值、保留期和 shopping 商品镜像模型。
 
@@ -353,27 +361,28 @@ GET /api/v1/catalog-sync/items/{item_id}
 1. 确认第 9 节列出的待确认事项；
 2. 记录两个仓库的当前 `git status --short`，不得覆盖已有改动；
 3. 在两个仓库分别写入同一份 API 契约和环境变量清单；
-4. 明确生产 PostgreSQL 的连接来源、备份方式和迁移执行者；
+4. 明确 x-comments PostgreSQL 的连接来源、备份方式和迁移执行者，以及 shopping MongoDB 的既有运维归属；
 5. 明确 x-comments 的 worker/scheduler 是否独立部署；
 6. 为 API token 规定创建、轮换和撤销方式，且不提交真实值。
 
 **通过标准**：所有决定已落入文档；购物仓库确认能实现同步端点客户端；无直接数据库访问方案残留。
 
-### Goal 1：x-comments 云端数据基础与单调度器
+### Goal 1：PostgreSQL 数据基础与单调度器
 
 **状态：`pending`，仅在 Goal 0 通过后启动。**
 
-**目标**：将生产运行时切换为 PostgreSQL，并使关键词清单和单实例定时调度在云端可恢复、无重复。
+**目标**：将 x-comments 的运行时数据库直接统一为 PostgreSQL，并使关键词清单和单实例定时调度在本地、CI 和云端均可恢复、无重复。
 
 **验收标准**：
 
-1. 空 PostgreSQL 可通过 Alembic 迁移到 head；
-2. API、worker/scheduler 的数据库 URL 均来自环境变量；
+1. 空 PostgreSQL 可通过 Alembic 迁移到 head；Docker Compose、本地运行说明和 CI 集成测试均实际连接 PostgreSQL；
+2. API、worker/scheduler 的数据库 URL 均来自环境变量，默认示例和运行文档均为 PostgreSQL URL；
 3. 启动两个 scheduler 实例的验证中，每个到期关键词只会创建一个任务；
 4. 重启后清单、`next_due_at`、任务状态和最近执行信息不丢失；
 5. scheduler 每 10 分钟的行为和“一个到期项”语义有自动化测试；
 6. 登录态仅作为云端 secret/受限文件挂载，未进入 Git、数据库、API 或日志；
-7. `pytest`、`ruff check .`、`mypy app` 通过，并更新架构、数据模型、配置、运行与限制文档。
+7. 不保留 SQLite 数据库 URL、SQLite 专用运行分支或 SQLite 容器卷作为本阶段的运行路径；
+8. `pytest`、`ruff check .`、`mypy app` 通过，并更新架构、数据模型、配置、运行与限制文档。
 
 ### Goal 2：x-comments 原子发布、状态判断与同步 API
 
@@ -442,17 +451,14 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ---
 
-## 9. 实施前必须由负责人确认的决策
+## 9. 已确认的部署与业务决策（2026-07-17）
 
-下列问题会改变具体实现，未确认前只可完成 Goal 0 的文档/调查，不可猜测为生产默认值：
-
-1. **10 分钟的含义**：是“每 10 分钟采一个到期关键词”（本文件默认），还是“清单每一个关键词都每 10 分钟采一次”？请给出首批关键词数量和单次允许采集上限。
-2. **云端位置**：两个服务是否部署在同一云厂商/同一 VPC？若不同，是否允许 x-comments API 通过公网 HTTPS 暴露给 shopping？
-3. **数据库责任**：是否同意 x-comments 与 shopping 各自拥有独立数据库，生产 x-comments 使用 PostgreSQL？
-4. **状态阈值**：连续 2 次完整缺失后下架是否接受？若不接受，请指定次数和是否允许低频详情复查。
-5. **购物与下单边界**：闲鱼商品是否真的允许进入现有扣款/订单流程，还是仅作为展示/导购信息？若允许下单，谁负责最终价格、库存、卖家可用性和履约确认？
-6. **购物仓库位置与技术栈**：请确认实际目录/分支、数据库类型和现有购物车/订单模型，以便 Goal 3、Goal 4 对接不破坏已有功能。
-7. **运维归属**：谁保管登录态 secret、API token、PostgreSQL 备份和云端告警接收人？
+1. **调度语义**：每 10 分钟只处理一个到期关键词；N 个持续到期词时，单词约每 `N × 10` 分钟一轮。首批清单控制在 3 至 5 个词，单轮安全上限维持 50 条；不得为实现逐词 10 分钟而增加浏览器并发或采集频率。
+2. **状态阈值**：连续 2 次完整成功采集未出现才标为 `off_shelf`；第一次为 `suspected_missing`，不推首页、保留购物车并提示。后续误下架较多时才评估调为 3 次或增加低频合规详情复查。
+3. **部署拓扑**：x-comments 与 shopping 部署在同一台云服务器。Catalog Sync 默认仅绑定宿主机 `127.0.0.1`，shopping 通过回环地址和 Bearer token 同步；不将该端口直接暴露公网。若未来拆为多服务器，必须另行启用 HTTPS、来源限制和网络策略。
+4. **数据与密钥运维**：x-comments 部署负责人（或同一运维）负责 PostgreSQL 迁移与每日备份，POC 备份保留 7 天、需要时可扩展至 14 天；同一角色将 `CATALOG_SYNC_TOKEN`、登录态及其他服务端 secret 写入云端密钥管理，不进入 Git 或聊天；采集/同步失败告警先发送至既有运维群或邮箱。
+5. **购物与下单边界**：闲鱼商品当前仅作为网站参考展示，**不得**进入加购、扣款、采购或订单流程。shopping 必须在前端和服务端同时拒绝该来源商品；若未来允许交易，必须新建独立 Goal 并重新确认最终价格、库存、卖家可用性和履约责任。
+6. **shopping 对接范围**：对接仓库为 `D:\Repo\c-shopping-jp-poc`，使用独立 MongoDB 商品镜像和持久化同步游标；不得直连 x-comments PostgreSQL。
 
 ---
 
@@ -461,8 +467,8 @@ GET /api/v1/catalog-sync/items/{item_id}
 - 为了让每个关键词高频运行而并发开多个浏览器、代理池、账号池或绕过风控；
 - 因一次空结果、网络错误、认证失效或同步失败批量标记下架；
 - 爬取时长时间锁表/锁库；
-- shopping 直连 x-comments 数据库或共享 SQLite 文件；
+- shopping 直连 x-comments PostgreSQL、共享 schema，或使用 x-comments 数据库账号；
+- 把 SQLite 作为本阶段运行时数据库、跨服务交接方式或 PostgreSQL 失败时的静默降级；
 - 把云端数据库密码、Cookie、Token、登录态、备份文件提交进任一仓库；
 - 将闲鱼采集数据描述为实时库存、价格或可履约保证；
 - 未完成当前 Goal 的全部验收就开始下一 Goal。
-

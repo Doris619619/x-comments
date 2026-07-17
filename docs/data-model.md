@@ -3,8 +3,7 @@
 > 数据来源以当前代码为准：`app/models/*`、`alembic/versions/20260711_0001_initial.py`、`app/core/database.py`、`app/core/config.py`。  
 > 若本文与代码冲突，以代码和迁移为准。
 
-> 默认引擎：**SQLite**（本地 / Docker Compose）  
-> 可选引擎：**PostgreSQL**（驱动已预留，当前 Goal **未要求**连真实 PG）  
+> 运行时引擎：**PostgreSQL**（本地 Compose、CI 集成环境和云端目标）
 > ORM：**SQLAlchemy 2.x（同步）**，`create_engine` + `sessionmaker`；**不是**异步，**未使用** `asyncpg`  
 > 迁移工具：**Alembic**（初始修订：`20260711_0001`）  
 > 连接配置：环境变量 `DATABASE_URL`（见 `.env.example`）
@@ -25,26 +24,24 @@
 
 | 场景 | `DATABASE_URL` | 说明 |
 |------|----------------|------|
-| 本地默认 | `sqlite:///./data/app.sqlite3` | `Settings.database_url` 默认值 |
-| Docker Compose | `sqlite:////app/data/app.sqlite3` | 数据落在 named volume `app_data` |
-| PostgreSQL（可选） | `postgresql+psycopg://...` | 同一套元数据与 Alembic 版本链 |
+| 本地直接运行 | `postgresql+psycopg://xcomments:...@127.0.0.1:5432/x_comments` | `Settings.database_url` 默认格式 |
+| Docker Compose | `postgresql+psycopg://xcomments:...@postgres:5432/x_comments` | 数据落在 named volume `postgres_data` |
+| 云端托管 PostgreSQL | `postgresql+psycopg://USER:PASSWORD@HOST:5432/x_comments` | x-comments 独占数据库和迁移 |
 
-应用层使用**同步**会话：`app.core.database.build_engine` → `SessionFactory` → `get_db()`。SQLite 会设置 `check_same_thread=False`，并开启 `pool_pre_ping=True`。
+应用层使用**同步**会话：`app.core.database.build_engine` → `SessionFactory` → `get_db()`，并开启 `pool_pre_ping=True`。
 
 ### 1.2 字符集
 
-- **SQLite**：文本以 UTF-8 存储（SQLite 默认行为）；项目未单独配置 charset。
-- **PostgreSQL**：使用库编码 `UTF8` 即可覆盖中文标题等完整 Unicode；项目**没有** MySQL 式 `utf8mb4` 声明，也**没有**单独的 Postgres 初始化脚本。
+- **PostgreSQL**：使用库编码 `UTF8` 即可覆盖中文标题等完整 Unicode；项目没有 MySQL 式 `utf8mb4` 声明。
 
-当前 `docker-compose.yml` **仅**运行应用容器 + SQLite，**不包含** Postgres 服务。
+当前 `docker-compose.yml` 运行 `postgres:16-alpine`、一次性 `migrate`、可横向扩容的 `api` 和唯一
+`scheduler-worker`；后两个服务仅在迁移成功后启动。`APP_ROLE=api` 不运行 Playwright，
+`APP_ROLE=scheduler_worker` 才运行定时采集和持久化任务轮询。
 
 ### 1.3 连接串示例
 
 ```text
-# 本地默认（与 .env.example 一致）
-sqlite:///./data/app.sqlite3
-
-# 可选 PostgreSQL（文档约定写法，非当前 Compose 默认）
+# 本地/云端 PostgreSQL
 postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME
 ```
 
@@ -105,7 +102,7 @@ ORM：`Enum(CrawlJobStatus, native_enum=False)` → **不创建**数据库原生
 
 ## 四、表结构明细
 
-以下类型为迁移中的 SQLAlchemy 类型；在 SQLite / PostgreSQL 上由方言映射为对应物理类型。
+以下类型为迁移中的 SQLAlchemy 类型；运行时由 PostgreSQL 方言映射为对应物理类型。
 
 时间列均为 `DateTime(timezone=True)`（带时区）。ORM 默认值函数为 `utc_now()`（`datetime.now().astimezone()`），**迁移未**为时间列设置 `server_default`（计数列除外）。
 
@@ -265,8 +262,28 @@ ORM：`Enum(CrawlJobStatus, native_enum=False)` → **不创建**数据库原生
 | `is_enabled` | `Boolean` | NOT NULL | 关闭后调度器不会选中 |
 | `interval_minutes` | `Integer` | NOT NULL | 同一个词的最小采集间隔，默认 60 分钟 |
 | `last_scheduled_at` | `DateTime(timezone=True)` | NULL | 最近入队时间，用于重启后的调度恢复 |
+| `last_completed_at` | `DateTime(timezone=True)` | NULL | 最近一次完整成功采集完成时间 |
+| `next_due_at` | `DateTime(timezone=True)` | NULL | 下一次允许调度时间；为空时按历史时间兼容计算 |
 | `note` | `Text` | NULL | 分类说明 |
 | `created_at` / `updated_at` | `DateTime(timezone=True)` | NOT NULL | 配置创建与更新时间 |
+
+---
+
+### 4.6 Catalog Sync 发布表
+
+以下表由 `20260716_0004` 创建。它们只在完整成功采集时与商品写入处于同一个短事务中；
+shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直接读取任一业务表。
+
+| 表名 | 核心字段 | 用途 |
+|------|----------|------|
+| `crawl_runs` | `run_id`、`job_id`、`catalog_keyword_id`、`status`、`is_comparable`、时间与错误信息 | 区分完整成功、部分成功、失败和风控；只有完整成功可比较缺失 |
+| `catalog_item_states` | `item_id`、`catalog_keyword_id`、`availability`、`missing_count`、`last_seen_at`、`last_checked_run_id` | 保存商品在单个清单词下的状态，避免多关键词互相误下架 |
+| `catalog_revisions` | 自增 `revision`、`source_run_id`、`status`、`published_at` | shopping 的持久化游标边界 |
+| `catalog_changes` | `revision`、`item_id`、`change_type`、`availability`、展示字段快照 | 可幂等应用的跨服务增量；不保存 `item_url` 或登录态 |
+
+`availability`：`active`、`suspected_missing`、`sold`、`off_shelf`、`unknown`。
+首次完整缺失转为 `suspected_missing`；连续达到 `CATALOG_MISSING_THRESHOLD` 后转为
+`off_shelf`。任何部分成功、失败或风控运行都不会增加 `missing_count`。
 
 ---
 
@@ -279,6 +296,10 @@ ORM：`Enum(CrawlJobStatus, native_enum=False)` → **不创建**数据库原生
 | 3 | `keywords` | 关键词表 | 规范化关键词字典 |
 | 4 | `item_keywords` | 商品关键词关联表 | 商品与关键词多对多 |
 | 5 | `catalog_keywords` | 杂货铺采集清单表 | 分类、搜索词和安全调度时间 |
+| 6 | `crawl_runs` | 采集批次表 | 判断本轮是否完整且可比较 |
+| 7 | `catalog_item_states` | 商品-清单状态表 | 多关键词下的缺失和可用状态 |
+| 8 | `catalog_revisions` | 发布版本表 | shopping 增量游标 |
+| 9 | `catalog_changes` | 商品变更表 | shopping 的可幂等同步事件 |
 
 当前 POC **没有**用户表、会话表、额度表或文件元数据表。
 
@@ -303,6 +324,8 @@ ORM：`Enum(CrawlJobStatus, native_enum=False)` → **不创建**数据库原生
 | `20260711_0001` | `alembic/versions/20260711_0001_initial.py` | 创建核心 4 张表及索引；`down_revision = None` |
 | `20260715_0002` | `alembic/versions/20260715_0002_catalog_keywords.py` | 创建杂货铺采集清单和五个默认搜索词 |
 | `20260715_0003` | `alembic/versions/20260715_0003_expand_catalog_keywords.py` | 归并为三个首页分类，并扩充至 18 个搜索词 |
+| `20260716_0004` | `alembic/versions/20260716_0004_catalog_sync.py` | 创建采集批次、缺失状态、revision 和变更事件表 |
+| `20260716_0005` | `alembic/versions/20260716_0005_unique_inflight_keyword.py` | 创建 PostgreSQL 同关键词 pending/running 部分唯一索引 |
 
 ```bash
 alembic upgrade head    # 应用迁移
@@ -311,4 +334,5 @@ alembic current         # 查看当前版本
 
 Alembic 在线/离线环境读取 `get_settings().database_url`，元数据来自 `Base.metadata`（通过 `import app.models` 注册全部模型）。
 
-迁移已在空 SQLite 上验证。PostgreSQL 可使用同一版本链；**当前 Goal 未要求**实际连接 PostgreSQL 服务。
+迁移已通过 PostgreSQL 离线 SQL 渲染验证。真实 PostgreSQL 升级需要在配置好 `DATABASE_URL` 和
+数据库备份后执行 `alembic upgrade head`；不得对生产库手工修改表结构。

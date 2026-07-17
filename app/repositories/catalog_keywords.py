@@ -77,33 +77,44 @@ class CatalogKeywordRepository:
             )
         )
 
-    def get_next_due(self, now: datetime) -> CatalogKeyword | None:
+    def get_next_due(
+        self, now: datetime, excluded_keywords: set[str] | None = None
+    ) -> CatalogKeyword | None:
         """
         返回一个已到期且最久未调度的搜索词。
 
-        参数：now 为当前 UTC 时间。返回：配置行或 None。异常：数据库错误向上抛出。副作用：无。
+        参数：now 为当前 UTC 时间、可选排除关键词。返回配置行或 None；数据库错误向上抛出。
+        无写入副作用。
         """
 
-        rows = self.list_enabled()
+        excluded = excluded_keywords or set()
+        rows = [row for row in self.list_enabled() if row.keyword not in excluded]
         due_rows = [
             row
             for row in rows
-            if row.last_scheduled_at is None
-            or row.last_scheduled_at + timedelta(minutes=row.interval_minutes) <= now
+            if row.next_due_at is None
+            and (
+                row.last_scheduled_at is None
+                or row.last_scheduled_at + timedelta(minutes=row.interval_minutes) <= now
+            )
+            or row.next_due_at is not None
+            and row.next_due_at <= now
         ]
         oldest = datetime.min.replace(tzinfo=now.tzinfo)
         return min(due_rows, key=lambda row: row.last_scheduled_at or oldest, default=None)
 
-    def mark_scheduled(self, keyword_id: int, now: datetime) -> None:
+    def mark_scheduled(self, keyword_id: int, now: datetime, *, commit: bool = True) -> None:
         """
         标记一个搜索词已进入采集队列。
 
         参数：keyword_id 为配置主键，now 为调度时间。
-        返回：无。异常：不存在时抛出 ValueError。副作用：更新并提交。
+        返回：无。异常：不存在时抛出 ValueError。副作用：更新并可选择提交。
         """
 
         row = self.session.get(CatalogKeyword, keyword_id)
         if row is None:
             raise ValueError("采集清单不存在")
         row.last_scheduled_at = now
-        self.session.commit()
+        row.next_due_at = now + timedelta(minutes=row.interval_minutes)
+        if commit:
+            self.session.commit()

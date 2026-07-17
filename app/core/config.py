@@ -5,8 +5,9 @@
 """
 
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,7 +21,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "sqlite:///./data/app.sqlite3"
+    database_url: str = "postgresql+psycopg://xcomments:xcomments@127.0.0.1:5432/x_comments"
     xianyu_storage_state_path: str = "storage_state.json"
     xianyu_headless: bool = True
     xianyu_max_pages: int = Field(default=3, ge=1, le=3)
@@ -30,7 +31,24 @@ class Settings(BaseSettings):
     xianyu_verify_timeout_seconds: int = Field(default=12, ge=5, le=30)
     xianyu_api_token: SecretStr | None = None
     catalog_scheduler_interval_seconds: int = Field(default=600, ge=60, le=3600)
+    app_role: Literal["api", "scheduler_worker"] = "api"
+    worker_poll_seconds: int = Field(default=5, ge=1, le=60)
+    catalog_missing_threshold: int = Field(default=2, ge=2, le=10)
+    catalog_sync_token: SecretStr | None = None
     log_level: str = "INFO"
+
+    @field_validator("database_url")
+    @classmethod
+    def require_postgresql_url(cls, value: str) -> str:
+        """
+        拒绝 SQLite 或其他非 PostgreSQL 运行时数据库连接串。
+
+        输入 DATABASE_URL；返回 PostgreSQL psycopg URL；不符合时抛出 ValueError，无副作用。
+        """
+
+        if not value.startswith("postgresql+psycopg://"):
+            raise ValueError("DATABASE_URL 必须使用 postgresql+psycopg:// PostgreSQL 连接串")
+        return value
 
 
 @lru_cache

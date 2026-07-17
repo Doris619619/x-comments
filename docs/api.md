@@ -6,14 +6,14 @@
 > 认证方式：商品读取与采集 POC 接口当前无用户登录鉴权；结算核验接口必须使用服务端
 > `Bearer` 令牌，且令牌未配置时默认关闭。
 > 校验失败统一返回 **422**（Pydantic 参数校验）；业务错误见各状态码。
-> 商城对接方式：Next.js 仅在服务器端通过 HTTP 调用本服务；当前服务未配置 CORS，浏览器不得直接调用商品接口。
+> 商城对接方式：shopping 仅在服务器端通过 HTTP 调用本服务；当前服务未配置 CORS，浏览器不得直接调用商品接口。商品镜像同步必须使用下文的 `catalog-sync` 版本化接口，不得直连数据库或从普通商品分页的缺失推断下架。
 
 ## 通用约定
 
 | 项目 | 说明 |
 |------|------|
 | Content-Type | `application/json` |
-| 任务执行 | `POST /api/v1/crawl-jobs` 立即落库 `pending`，并入队单 worker；正式应用 lifespan 启 worker，测试应用可禁用 |
+| 任务执行 | `POST /api/v1/crawl-jobs` 立即落库 `pending`；唯一 scheduler-worker 原子认领持久化任务，测试应用可禁用 worker |
 | 排序（商品列表） | `last_seen_at DESC, item_id ASC` |
 | OpenAPI | FastAPI 自动生成：`/docs`、`/openapi.json` |
 
@@ -44,25 +44,31 @@
 
 ### `GET /health`
 
-验证应用与数据库连通性。无需认证。
+验证应用与数据库连通性，并返回部署监控所需的最近采集/发布指标。无需认证。
 
 **响应 200**
 
 ```json
 {
   "status": "ok",
-  "database": "ok"
+  "database": "ok",
+  "last_successful_crawl_at": "2026-07-17T10:00:00+00:00",
+  "last_published_revision": 42,
+  "last_published_at": "2026-07-17T10:00:01+00:00",
+  "consecutive_failed_runs": 0
 }
 ```
 
-数据库不可用时由框架返回错误（非业务 200）。
+`consecutive_failed_runs` 只统计最近一次成功采集之后已结束的部分成功、失败和风控运行；它是
+告警输入，不会触发自动下架。数据库不可用时由框架返回错误（非业务 200）。
 
 
 ## 2. 采集任务
 
 ### `POST /api/v1/crawl-jobs`
 
-创建关键词采集任务：写入 `pending` 记录，若应用已挂载 worker 则立即入队，并返回完整任务对象（含 `job_id`）。
+创建关键词采集任务：写入 `pending` 记录，并返回完整任务对象（含 `job_id`）。独立
+scheduler-worker 会从持久化队列原子认领任务，因此 API 与 worker 不需要同进程。
 
 **请求体**
 
@@ -292,7 +298,69 @@ Authorization: Bearer <XIANYU_API_TOKEN>
 
 ---
 
-## 4. 杂货铺搜索清单
+## 4. Catalog Sync（仅 shopping 服务端）
+
+以下接口均要求请求头：
+
+```text
+Authorization: Bearer <CATALOG_SYNC_TOKEN>
+```
+
+令牌未配置返回 **503**，缺失或错误返回 **401**。令牌只能存在两个服务的服务端环境变量中，不得放入 `NEXT_PUBLIC_*`、浏览器或日志。
+
+### `GET /api/v1/catalog-sync/revisions/latest`
+
+返回 shopping 可读取的最新完整发布版本。空目录稳定返回 `revision=0`、`status="empty"`。
+
+```json
+{
+  "revision": 42,
+  "published_at": "2026-07-16T10:00:00+00:00",
+  "source": "xianyu",
+  "status": "published"
+}
+```
+
+### `GET /api/v1/catalog-sync/changes?after_revision={integer}&limit={1..500}`
+
+按 `revision ASC, item_id ASC` 返回增量，且不在一个 revision 中间截断。shopping 必须先在自己的数据库幂等应用整页变更，再推进本地游标到 `to_revision`。
+
+```json
+{
+  "from_revision": 40,
+  "to_revision": 42,
+  "has_more": false,
+  "changes": [
+    {
+      "revision": 42,
+      "change_type": "availability_changed",
+      "item_id": "1234567890",
+      "availability": "off_shelf",
+      "title": "商品标题",
+      "price": "12.50",
+      "currency": "CNY",
+      "image_url": null,
+      "location": "上海",
+      "last_seen_at": "2026-07-16T09:50:00+00:00",
+      "status_changed_at": "2026-07-16T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+`availability` 只会是 `active`、`suspected_missing`、`sold`、`off_shelf` 或 `unknown`。接口不返回 `item_url`、Cookie、登录态或内部数据库字段。若游标早于已保留的最小 revision 或大于当前版本，返回 **409**；shopping 必须转用全量重建接口，不能把该错误解释为商品下架。
+
+### `GET /api/v1/catalog-sync/items?page={page}&page_size={1..500}`
+
+返回每个商品的**最近已发布快照**，按 `item_id ASC` 分页，用于处理上述 **409** 后的全量重建。每项字段与 `changes` 中的单条变更相同。
+
+### `GET /api/v1/catalog-sync/items/{item_id}`
+
+返回一个商品的最近已发布快照；不存在返回 **404**。该接口仅用于恢复或诊断，不替代增量游标同步。
+
+---
+
+## 5. 杂货铺搜索清单
 
 ### `GET /api/v1/catalog-keywords`
 
@@ -315,7 +383,7 @@ Authorization: Bearer <XIANYU_API_TOKEN>
 
 ---
 
-## 5. POC 演示页
+## 6. POC 演示页
 
 ### `GET /`
 
