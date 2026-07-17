@@ -21,7 +21,7 @@ HTTP 请求
   → app/services / repositories
 
 商城同步（Goal Merge 2）
-  → shopping 服务器端每 10 分钟经同机回环地址调用带 Bearer 认证的 Catalog Sync API
+  → shopping 的独立同步容器每 10 分钟经共享 Docker 私有网络调用带 Bearer 认证的 Catalog Sync API
   → GET /api/v1/catalog-sync/changes?after_revision=...
   → shopping 自己的商品镜像和持久化游标
   → app/api → repositories → x-comments PostgreSQL

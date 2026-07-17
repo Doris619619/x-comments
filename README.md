@@ -84,7 +84,8 @@ Compose 会：
 2. 把本地 `storage_state.json` 只读挂载进容器；
 3. 启动 PostgreSQL 16，并以 `postgres_data` named volume 持久化数据库；
 4. 由一次性 `migrate` 服务执行 `alembic upgrade head`，成功后 API 和 worker 才启动；
-5. 在 `127.0.0.1:8000` 启动仅 API 服务；同机的 shopping 服务通过回环地址同步目录，端口不直接暴露到公网；
+5. 在 `127.0.0.1:8000` 启动仅 API 服务；同机 shopping 的独立同步容器通过共享的 Docker 私有网络，以
+   `x-comments-api:8000` 服务名同步目录，端口不直接暴露到公网；
 6. 启动恰好一个不暴露端口的 `scheduler-worker`，负责 Playwright 与 10 分钟调度。
 
 停止：
@@ -125,7 +126,7 @@ PostgreSQL 验收。
 
 ## 数据和限制
 
-数据模型见 [docs/data-model.md](docs/data-model.md)，架构见 [docs/architecture.md](docs/architecture.md)，风险与限制见 [docs/known-limitations.md](docs/known-limitations.md)。
+数据模型见 [docs/data-model.md](docs/data-model.md)，架构见 [docs/architecture.md](docs/architecture.md)，风险与限制见 [docs/known-limitations.md](docs/known-limitations.md)，云端备份和健康检查见 [docs/operations.md](docs/operations.md)。
 
 当前真实验收只覆盖最多 3 页或 50 条商品。搜索结果未出现不能直接证明商品已售出或下架：
 仅完整成功采集会计入缺失，首次缺失为 `suspected_missing`，连续两次完整缺失才为
