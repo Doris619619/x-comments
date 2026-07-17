@@ -56,6 +56,7 @@ npm.cmd run build                            # passed
 - 云端 `/health` 与 shopping 的持久化同步游标已实际核对：x-comments revision 和 shopping `lastAppliedRevision` 一致，最近成功采集与同步均在健康阈值内。
 - 已安装 `x-comments-postgres-backup.timer`（每日 02:20）与 `x-comments-deployment-health.timer`（每 5 分钟）。手工备份已成功生成 custom-format PostgreSQL dump 和 SHA-256 校验文件，备份保留策略为 7 天。
 - shopping 已实际同步 active 闲鱼镜像；`/xianyu` 可列出商品，首页响应也带入首批 8 条闲鱼商品。闲鱼商品仅能以 CNY 参考价加入购物车（每件 1 个），结算、订单和履约仍被禁止。
+- 已完成桌面及移动端浏览器验收：闲鱼商品详情可保存到购物车、数量固定为 1、购物车的零金额折扣显示为 `(0.0%)` 而非 `NaN`，且“購入手続きへ”按钮处于禁用状态。
 
 ## 尚待确认的运行项
 
@@ -66,4 +67,4 @@ npm.cmd run build                            # passed
 
 1. 提供既有运维群或邮箱的兼容 webhook，并以 `/etc/x-comments-monitor.env` 的受限权限配置外部告警；
 2. 在确认的关键词清单上记录完整采集、连续缺失两次、部分失败采集和 409 全量重建的审计证据；
-3. 完成桌面与移动端浏览器验收，确认闲鱼商品可加购、数量固定为 1，且所有结算/订单绕过均被拒绝。
+3. 在不影响线上业务的前提下，补齐可执行的回滚演练记录，并核对回滚后服务健康、同步游标与备份可恢复性。
