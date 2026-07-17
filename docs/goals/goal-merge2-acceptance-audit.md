@@ -3,7 +3,7 @@
 ## 审计结论
 
 ```text
-GOAL 0–4 ACCEPTED — GOAL 5 LIVE STATE-CHANGE OBSERVATION PENDING
+GOAL 0–5 ACCEPTED
 ```
 
 代码实现、离线测试、真实本机 PostgreSQL 和 2026-07-17 的同机云端部署均已有证据：迁移、单 worker、目录同步、首次备份和健康检查已实际完成。本文件仍不把“仅 systemd 日志告警”标为外部告警已通过，也不伪造连续缺失或风控失败来完成状态演练。
@@ -51,7 +51,11 @@ GOAL 0–4 ACCEPTED — GOAL 5 LIVE STATE-CHANGE OBSERVATION PENDING
 
 已记录真实云端部署、revision 与 shopping 游标一致、首次 PostgreSQL 备份、隔离恢复和健康检查通过。负责人已授权并配合完成一次真实采集：任务 `57d1244d-5adc-4bf7-b849-d54c0bc5c3c3`（`遥控器`）成功发现 50 条、写入 46 条新增和 4 条更新；x-comments 在 15:29:28 UTC 发布 revision 40，shopping 在 15:30:11 UTC 持久化到 revision 40，更新后的健康检查实际返回 `40/40`。随后公网商城 `/xianyu` 返回 HTTP 200、带 CNY 商品且含该关键词。
 
-该结果证明采集→发布→同步/展示链路可用，但不等同于状态变化演练。负责人确认外部邮件投递暂不启用；健康检查继续以 systemd `DEPLOYMENT_ALERT` 日志和阈值检查运行。回滚基线已固定为 x-comments `a86c5b3`、shopping `efb536e`，窗口为工作日 22:00–24:00（UTC+8）；当前服务器已经运行这些基线，所以不执行无意义回退。后续只应在真实业务数据出现连续缺失、恢复或安全失败时记录状态变化。
+该结果证明采集→发布→同步/展示链路可用。随后自然调度在 revision 42 产生 307 条 `SUSPECTED_MISSING` 和 173 条 `OFF_SHELF` 关联；最近下架样本均为 `missing_count=2`，直接验证连续两次完整缺失才下架。shopping 在 15:50:12 UTC 同步到 revision 42，镜像包含 899 条 `active`、306 条 `suspected_missing` 与 173 条 `off_shelf`，证明状态变化没有在跨仓库边界丢失。
+
+负责人确认外部邮件投递暂不启用；健康检查继续以 systemd `DEPLOYMENT_ALERT` 日志和阈值检查运行。回滚基线已固定为 x-comments `a86c5b3`、shopping `efb536e`，窗口为工作日 22:00–24:00（UTC+8）；当前服务器已经运行这些基线，所以不执行无意义回退。恢复或安全失败等额外状态仅按自然业务结果记录。
+
+因此，本目标的功能、云端部署、真实采集、同步展示、真实下架状态、备份恢复、监控阈值和交接文档均已验收通过。
 
 ## 当前可重复命令
 

@@ -435,7 +435,7 @@ GET /api/v1/catalog-sync/items/{item_id}
 
 ### Goal 5：云端端到端演练、监控与交接
 
-**状态：`in_progress`**
+**状态：`passed`**
 
 **目标**：在真实云端环境完成一次可审计的采集→发布→同步→展示→下架状态演练。
 
