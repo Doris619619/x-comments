@@ -7,8 +7,6 @@ x-app-environment: &app-environment
   XIANYU_MAX_ITEMS: "50"
   XIANYU_PAGE_DELAY_SECONDS: "2.0"
   XIANYU_VERIFY_TIMEOUT_SECONDS: "12"
-  XIANYU_API_TOKEN: "${XIANYU_API_TOKEN:-}"
-  CATALOG_SYNC_TOKEN: "${CATALOG_SYNC_TOKEN:-}"
   CATALOG_MISSING_THRESHOLD: "${CATALOG_MISSING_THRESHOLD:-2}"
   CATALOG_SCHEDULER_INTERVAL_SECONDS: "${CATALOG_SCHEDULER_INTERVAL_SECONDS:-600}"
   WORKER_POLL_SECONDS: "${WORKER_POLL_SECONDS:-5}"
@@ -50,6 +48,9 @@ services:
       <<: *app-environment
       APP_ROLE: api
       RUN_MIGRATIONS: "false"
+      XIANYU_API_TOKEN: "${XIANYU_API_TOKEN:-}"
+      CATALOG_SYNC_TOKEN: "${CATALOG_SYNC_TOKEN:-}"
+      PROCUREMENT_API_TOKEN: "${PROCUREMENT_API_TOKEN:-}"
     volumes:
       - ./storage_state.json:/app/storage_state.json:ro
     networks:
@@ -74,11 +75,29 @@ services:
       <<: *app-environment
       APP_ROLE: scheduler_worker
       RUN_MIGRATIONS: "false"
+      PROCUREMENT_CHAT_ENABLED: "${PROCUREMENT_CHAT_ENABLED:-false}"
+      PROCUREMENT_AUTO_SEND_ENABLED: "${PROCUREMENT_AUTO_SEND_ENABLED:-false}"
+      PROCUREMENT_AUTO_SEND_MIN_CONFIDENCE: "${PROCUREMENT_AUTO_SEND_MIN_CONFIDENCE:-0.85}"
+      PROCUREMENT_MAX_AUTO_ROUNDS: "${PROCUREMENT_MAX_AUTO_ROUNDS:-3}"
+      PROCUREMENT_WORKER_POLL_SECONDS: "${PROCUREMENT_WORKER_POLL_SECONDS:-5}"
+      PROCUREMENT_TASK_LEASE_SECONDS: "${PROCUREMENT_TASK_LEASE_SECONDS:-90}"
+      PROCUREMENT_SELLER_POLL_SECONDS: "${PROCUREMENT_SELLER_POLL_SECONDS:-15}"
+      PROCUREMENT_OUTBOX_MAX_ATTEMPTS: "${PROCUREMENT_OUTBOX_MAX_ATTEMPTS:-8}"
+      XIANYU_EXPECTED_ACCOUNT_ID: "${XIANYU_EXPECTED_ACCOUNT_ID:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+      DEEPSEEK_MODEL: "${DEEPSEEK_MODEL:-deepseek-v4-flash}"
+      DEEPSEEK_TIMEOUT_SECONDS: "${DEEPSEEK_TIMEOUT_SECONDS:-15}"
+      SHOPPING_CALLBACK_URL: "${SHOPPING_CALLBACK_URL:-}"
+      SHOPPING_PROCUREMENT_TOKEN: "${SHOPPING_PROCUREMENT_TOKEN:-}"
     volumes:
       - ./storage_state.json:/app/storage_state.json:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
+    networks:
+      default: {}
+      commerce_internal: {}
     restart: unless-stopped
 
 volumes:

@@ -7,7 +7,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +35,22 @@ class Settings(BaseSettings):
     worker_poll_seconds: int = Field(default=5, ge=1, le=60)
     catalog_missing_threshold: int = Field(default=2, ge=2, le=10)
     catalog_sync_token: SecretStr | None = None
+    procurement_chat_enabled: bool = False
+    procurement_auto_send_enabled: bool = False
+    procurement_auto_send_min_confidence: float = Field(default=0.85, ge=0.8, le=1.0)
+    procurement_max_auto_rounds: int = Field(default=3, ge=1, le=3)
+    procurement_api_token: SecretStr | None = None
+    procurement_worker_poll_seconds: int = Field(default=5, ge=1, le=60)
+    procurement_task_lease_seconds: int = Field(default=90, ge=30, le=300)
+    procurement_seller_poll_seconds: int = Field(default=15, ge=5, le=300)
+    procurement_outbox_max_attempts: int = Field(default=8, ge=1, le=20)
+    xianyu_expected_account_id: str | None = None
+    deepseek_api_key: SecretStr | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
+    shopping_callback_url: str | None = None
+    shopping_procurement_token: SecretStr | None = None
     log_level: str = "INFO"
 
     @field_validator("database_url")
@@ -49,6 +65,54 @@ class Settings(BaseSettings):
         if not value.startswith("postgresql+psycopg://"):
             raise ValueError("DATABASE_URL 必须使用 postgresql+psycopg:// PostgreSQL 连接串")
         return value
+
+    @field_validator("deepseek_api_key", "shopping_procurement_token", mode="before")
+    @classmethod
+    def normalize_optional_worker_secret(cls, value: object) -> object | None:
+        """
+        将 Compose 注入的空字符串规范化为未配置密钥。
+
+        输入原始环境值；返回原值或 None；不展示 SecretStr 内容且无外部副作用。
+        """
+
+        if value is None:
+            return None
+        if isinstance(value, SecretStr):
+            return value if value.get_secret_value().strip() else None
+        return value if str(value).strip() else None
+
+    @model_validator(mode="after")
+    def validate_procurement_worker_settings(self) -> "Settings":
+        """
+        对采购聊天、自动发送、模型密钥和固定回调配置执行失败关闭校验。
+
+        输入已完成字段校验的配置并返回自身；开关依赖、密钥长度或 URL 不合法时抛出
+        ValueError；不读取登录态、不连接外部服务且无副作用。
+        """
+
+        if self.procurement_auto_send_enabled and not self.procurement_chat_enabled:
+            raise ValueError("PROCUREMENT_AUTO_SEND_ENABLED 依赖 PROCUREMENT_CHAT_ENABLED")
+        callback_configured = bool((self.shopping_callback_url or "").strip())
+        token_configured = self.shopping_procurement_token is not None
+        if callback_configured != token_configured:
+            raise ValueError("SHOPPING_CALLBACK_URL 与 SHOPPING_PROCUREMENT_TOKEN 必须同时配置")
+        if token_configured:
+            token = self.shopping_procurement_token
+            assert token is not None
+            if len(token.get_secret_value().strip()) < 32:
+                raise ValueError("SHOPPING_PROCUREMENT_TOKEN 至少需要 32 字符")
+        if callback_configured and not str(self.shopping_callback_url).startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError("SHOPPING_CALLBACK_URL 必须使用 HTTP 或 HTTPS")
+        if self.procurement_chat_enabled:
+            if not (self.xianyu_expected_account_id or "").strip():
+                raise ValueError("采购聊天开启时必须配置 XIANYU_EXPECTED_ACCOUNT_ID")
+            if self.deepseek_api_key is None:
+                raise ValueError("采购聊天开启时必须配置 DEEPSEEK_API_KEY")
+            if not callback_configured:
+                raise ValueError("采购聊天开启时必须配置固定商城回调与独立令牌")
+        return self
 
 
 @lru_cache

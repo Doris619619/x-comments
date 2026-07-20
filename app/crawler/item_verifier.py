@@ -21,6 +21,11 @@ from app.services.item_verification import (
     LiveVerificationStatus,
     VerificationTarget,
 )
+from app.services.xianyu_account_guard import (
+    AccountAccessGuard,
+    AccountGuardInput,
+    normalize_account_guard,
+)
 
 PRICE_TEXT_PATTERN = re.compile(
     r"(?<![\d.\-])(?:CNY\s*)?[¥￥]?\s*(\d+(?:\.\d{1,2})?)(?![\d.])"
@@ -83,7 +88,7 @@ class XianyuItemVerifier:
     输入应用配置；每次 verify 只导航一次，不重试；登录或风控信号会返回 blocked。
     """
 
-    def __init__(self, settings: Settings, account_lock: asyncio.Lock | None = None) -> None:
+    def __init__(self, settings: Settings, account_lock: AccountGuardInput | None = None) -> None:
         """
         保存已校验的登录态路径、浏览器模式和核验时限。
 
@@ -92,6 +97,7 @@ class XianyuItemVerifier:
 
         self.settings = settings
         self.account_lock = account_lock or asyncio.Lock()
+        self.account_guard: AccountAccessGuard = normalize_account_guard(self.account_lock)
 
     async def verify(self, target: VerificationTarget) -> LiveVerificationResult:
         """
@@ -141,7 +147,7 @@ class XianyuItemVerifier:
         输入目标与登录态路径；返回核验结果；等待锁和页面异常向上抛出；副作用为串行页面访问。
         """
 
-        async with self.account_lock:
+        async with self.account_guard.hold():
             return await self._verify_once(target, state_path)
 
     async def _verify_once(

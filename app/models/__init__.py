@@ -17,6 +17,22 @@ from app.models.catalog_sync import (
 from app.models.crawl_job import CrawlJob, CrawlJobStatus
 from app.models.item import Item
 from app.models.keyword import ItemKeyword, Keyword
+from app.models.procurement import (
+    ConversationMessage,
+    ConversationMessageDirection,
+    ConversationMessageStatus,
+    ConversationSenderRole,
+    ConversationSession,
+    ConversationSessionStatus,
+    ProcurementAuditActorType,
+    ProcurementAuditLog,
+    ProcurementExecutionTask,
+    ProcurementExecutionTaskStatus,
+    ProcurementNextAction,
+    ProcurementOutbox,
+    ProcurementOutboxStatus,
+    ProcurementPolicyResult,
+)
 
 __all__ = [
     "CatalogAvailability",
@@ -29,7 +45,21 @@ __all__ = [
     "CrawlJobStatus",
     "CrawlRun",
     "CrawlRunStatus",
+    "ConversationMessage",
+    "ConversationMessageDirection",
+    "ConversationMessageStatus",
+    "ConversationSenderRole",
+    "ConversationSession",
+    "ConversationSessionStatus",
     "Item",
     "ItemKeyword",
     "Keyword",
+    "ProcurementAuditActorType",
+    "ProcurementAuditLog",
+    "ProcurementExecutionTask",
+    "ProcurementExecutionTaskStatus",
+    "ProcurementNextAction",
+    "ProcurementOutbox",
+    "ProcurementOutboxStatus",
+    "ProcurementPolicyResult",
 ]
