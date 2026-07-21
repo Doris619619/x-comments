@@ -287,6 +287,25 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 
 ---
 
+### 4.7 采购聊天领域表
+
+迁移 `20260720_0006` 增加以下五表。任务 API 已使用前两表；当前 DeepSeek 适配器只在内存返回
+已验证草稿，尚未把草稿写入 `conversation_messages`，真实闲鱼聊天也未接入。
+
+| 表名 | 核心字段 | 约束与用途 |
+|------|----------|------------|
+| `procurement_execution_tasks` | `task_id`、`source_item_id`、标题/CNY 整数分快照、目标、轮次/期限、请求幂等键/body 哈希、状态/下一动作、租约、摘要/原因与时间 | `task_id` 主键、请求幂等键唯一；价格非负、轮次 1–3；只表达本地核验与聊天执行，不含购买或付款授权 |
+| `conversation_sessions` | `session_id`、`task_id`、`source_item_id`、卖家快照、账号别名、`status`、`round_count`、`event_seq`、租约与时间 | `task_id` 唯一；只保存商城任务 UUID，不保存客户资料、Cookie 或密码 |
+| `conversation_messages` | 会话内 `seq`、方向、角色、正文、正文哈希、回复关系、LLM/策略字段、发送时间 | `(session_id, seq)`、`(session_id, external_message_id)` 和 `idempotency_key` 唯一；一条出站消息从草稿演进至发送结果，不重复建行 |
+| `procurement_audit_logs` | 任务/会话/消息关联、actor、动作、前后状态、原因、脱敏元数据、关联与幂等键 | 只追加；同任务、幂等键和动作不得重复；普通日志不得记录消息正文 |
+| `procurement_outbox` | `event_id`、任务内 `event_seq`、事件类型、JSON payload、投递状态、租约、重试时间 | `event_id`、幂等键及 `(task_id, event_seq)` 唯一；供后续回调商城的事务 Outbox 使用 |
+
+会话状态为 `pending_open`、`active`、`waiting_seller`、`completed`、
+`human_review_required`、`blocked`、`failed` 或 `cancelled`。消息状态区分入站观察/分析、出站草稿/
+策略/排队/发送以及 `policy_blocked`、`send_failed`、`superseded`，`sent` 只能表示页面结果已确认。
+
+---
+
 ## 五、表清单汇总
 
 | 序号 | 表名 | 中文名 | 核心用途 |
@@ -300,8 +319,13 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 | 7 | `catalog_item_states` | 商品-清单状态表 | 多关键词下的缺失和可用状态 |
 | 8 | `catalog_revisions` | 发布版本表 | shopping 增量游标 |
 | 9 | `catalog_changes` | 商品变更表 | shopping 的可幂等同步事件 |
+| 10 | `procurement_execution_tasks` | 本地采购执行任务表 | 来源快照、幂等创建、状态与下一动作 |
+| 11 | `conversation_sessions` | 采购聊天会话表 | 商城任务与闲鱼会话的一对一执行快照 |
+| 12 | `conversation_messages` | 采购聊天消息表 | 入站去重及出站草稿到发送结果的生命周期 |
+| 13 | `procurement_audit_logs` | 采购审计表 | 脱敏、追加式状态与安全决策证据 |
+| 14 | `procurement_outbox` | 采购事件 Outbox | 与领域变更同事务保存的有序回调事件 |
 
-当前 POC **没有**用户表、会话表、额度表或文件元数据表。
+当前 POC **没有**用户表、额度表或文件元数据表；采购会话表不保存商城用户身份和客户资料。
 
 ---
 
@@ -309,10 +333,10 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 
 | 设计点 | 本库实践（以迁移为准） |
 |--------|------------------------|
-| 主键 | `crawl_jobs.job_id`、`items.item_id`、`keywords.id`、`item_keywords(item_id, keyword_id)` |
+| 主键 | 原有采集/目录主键，以及采购表的 UUID 主键 |
 | 外键列 | `item_keywords` 两列作为复合主键组成部分；未另建单独非唯一索引 |
-| 唯一业务键 | `keywords.normalized_value` |
-| 查询加速 | `crawl_jobs.keyword` / `status`；`items.last_seen_at` |
+| 唯一业务键 | `keywords.normalized_value`；采购 `task_id`、消息/事件幂等键和任务内事件序号 |
+| 查询加速 | `crawl_jobs.keyword` / `status`；`items.last_seen_at`；采购任务、会话状态和 Outbox 到期时间 |
 | 全文检索 | **未实现** |
 
 ---
@@ -326,6 +350,7 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 | `20260715_0003` | `alembic/versions/20260715_0003_expand_catalog_keywords.py` | 归并为三个首页分类，并扩充至 18 个搜索词 |
 | `20260716_0004` | `alembic/versions/20260716_0004_catalog_sync.py` | 创建采集批次、缺失状态、revision 和变更事件表 |
 | `20260716_0005` | `alembic/versions/20260716_0005_unique_inflight_keyword.py` | 创建 PostgreSQL 同关键词 pending/running 部分唯一索引 |
+| `20260720_0006` | `alembic/versions/20260720_0006_procurement_chat_core.py` | 创建本地采购执行任务、聊天会话、消息、审计和事务 Outbox 表 |
 
 ```bash
 alembic upgrade head    # 应用迁移

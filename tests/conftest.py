@@ -49,6 +49,7 @@ def client(session_factory: sessionmaker[Session]) -> Generator[TestClient, None
     application = create_app(
         verification_token="offline-test-token-0123456789abcdef",
         catalog_sync_token="offline-sync-token-0123456789abcdef",
+        procurement_api_token="offline-procurement-token-0123456789abcdef",
     )
 
     def override_db() -> Generator[Session, None, None]:

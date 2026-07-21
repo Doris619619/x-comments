@@ -75,8 +75,11 @@ APP_ROLE=scheduler_worker python -m uvicorn app.main:app --host 127.0.0.1 --port
 容器内使用 Xvfb 运行有头 Chromium。首次启动前必须先在宿主机按上节完成人工登录，确保项目根目录有被 Git 忽略的 `storage_state.json`。
 
 ```bash
+docker network inspect commerce_internal >/dev/null 2>&1 || docker network create commerce_internal
 docker compose up --build
 ```
+
+`commerce_internal` 是与 shopping 共用的宿主机内部网络，只需创建一次。
 
 Compose 会：
 
@@ -108,6 +111,9 @@ docker compose down
 - `GET /api/v1/catalog-sync/revisions/latest`（shopping 服务端 Bearer 认证）
 - `GET /api/v1/catalog-sync/changes`（shopping 增量同步）
 - `GET /api/v1/catalog-sync/items`（游标失效后的分页全量重建）
+- `POST /api/v1/procurement-tasks`（shopping 服务端幂等创建本地执行任务）
+- `GET /api/v1/procurement-tasks/{task_id}`（查询本地执行状态）
+- `POST /api/v1/procurement-tasks/{task_id}/cancel`（取消本地执行任务）
 
 完整请求/响应见 [docs/api.md](docs/api.md)。
 

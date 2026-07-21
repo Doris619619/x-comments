@@ -31,3 +31,21 @@ def test_build_engine_rejects_non_postgresql_url() -> None:
 
     with pytest.raises(ValueError, match="仅支持 PostgreSQL"):
         build_engine("sqlite:///./data/app.sqlite3")
+
+
+def test_procurement_auto_send_defaults_closed_and_has_hard_limits() -> None:
+    """
+    验证采购自动发送默认关闭，且置信度和轮次不能被配置为不安全值。
+
+    无输入；断言失败抛出 AssertionError；不访问数据库、浏览器或网络。
+    """
+
+    settings = Settings()
+    assert settings.procurement_auto_send_enabled is False
+    assert settings.procurement_auto_send_min_confidence == 0.85
+    assert settings.procurement_max_auto_rounds == 3
+
+    with pytest.raises(ValidationError):
+        Settings(procurement_auto_send_min_confidence=0.5)
+    with pytest.raises(ValidationError):
+        Settings(procurement_max_auto_rounds=4)

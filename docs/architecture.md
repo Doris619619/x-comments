@@ -53,9 +53,19 @@ HTTP 请求
 - `app/api/catalog_sync.py`：只供 shopping 服务器端使用的 Bearer 认证增量、全量重建和单商品
   快照 API；不返回闲鱼原始链接或登录态。
 - `alembic/`：数据库结构版本。
-- 商城不读取本服务数据库，也不从浏览器直接调用本服务；跨服务边界固定为只读 HTTP API。
+- 商城不读取本服务数据库，也不从浏览器直接调用本服务；Catalog 边界保持只读 HTTP，采购任务则只
+  允许 shopping 服务端通过独立令牌创建、查询和取消本地执行记录。
 - `app/services/item_verification.py`：只依赖商品存在性协议和实时核验协议，不依赖 ORM 模型。
 - `app/crawler/item_verifier.py`：单次详情身份、风险、不可售文案和当前价格核验；不写数据库。
+- `app/models/procurement.py`：本地采购执行任务、会话、消息、追加审计和事务 Outbox。
+- `app/schemas/procurement.py` / `procurement_llm.py`：商城任务、回调事件和 LLM JSON 的严格契约；
+  未知字段直接拒绝，模型不能输出购买或付款动作。
+- `app/ai/`：供应商无关草稿契约、`procurement_v1` 提示词和同步 DeepSeek 适配器；卖家消息与
+  商品标题按不可信外部数据隔离，模块只返回草稿，不访问数据库或 Playwright。
+- `app/services/procurement_policy.py`：无副作用的确定性草稿检查；不调用 Playwright，也不发送消息。
+- `app/services/procurement_orchestrator.py`：把订单绑定任务、来源实时核验、聊天适配器、DeepSeek 草稿、
+  确定性策略和单次发送事务串联起来；最多三轮，不包含购买、付款或地址动作。
+- `app/services/procurement_outbox.py`：向固定商城回调地址投递有序事件；重试只重试回调，不会触发聊天重发。
 
 ## 数据流
 
@@ -73,6 +83,18 @@ HTTP 请求
 `suspected_missing`，连续 `CATALOG_MISSING_THRESHOLD`（默认 2）次完整缺失后才标为
 `off_shelf`；部分成功、风控和失败只保留本轮确实看到的商品，不进行缺失判断。首批清单控制在
 3 至 5 个词内，单轮上限保持 50 条；N 个持续到期词时，单个词约每 `N × 10` 分钟轮询一次。
+
+采购本地 API 先以请求幂等键和规范化 body SHA-256 查询原任务；同键同正文返回原任务，同键不同
+正文返回 409。首次创建必须能在 `items` 找到商品，且最新发布 Catalog 快照为 `active`、币种为 CNY、
+价格与商城整数分快照完全一致。通过后在同一短事务中创建 `ProcurementExecutionTask` 与
+`ConversationSession`。商品 URL 不接受调用方输入，只从 `Item.item_url` 复制到内部会话。
+
+入站消息通过外部消息 ID、出站草稿通过 SHA-256 幂等键去重；状态变化与商城回调事件在同一数据库
+事务中写入审计和 `ProcurementOutbox`。投递器按每个任务的 `event_seq` 串行回调，任何同任务未交付
+事件都会阻止下一次外部聊天动作。商城须按 `event_id` 幂等接收；回调失败会独立退避重试，但绝不
+重复执行 Playwright 发送。发送前先持久化 `sending`，并在任务/会话行锁内完成唯一一次点击；崩溃或
+结果不确定时进入人工审核，恢复后不重发。首次打开会话保存既有末条消息指纹作为基线，避免把历史
+消息误认为本次回复。编排器和投递器只在唯一 `scheduler_worker` 角色运行。
 
 商品解析优先使用页面正常访问触发的搜索响应 JSON。解析器验证响应 `itemId` 与商品 URL `item?id=` 一致，任何不一致记录都不会入库。
 
@@ -94,13 +116,31 @@ PostgreSQL 容器并使用 `postgres_data` volume。配置示例见 `.env.exampl
 回环地址，shopping 的独立同步容器通过内部 Docker 网络的 `x-comments-api` 服务名访问；若未来拆分服务器，才必须改为 HTTPS、来源限制和服务间认证。`APP_ROLE` 只能为 `api` 或 `scheduler_worker`：云端可扩容 API，
 但只能部署一个 scheduler-worker；该 worker 同时持有唯一 Playwright 队列和定时调度职责。
 
+采购编排和脚本发送分别由 `PROCUREMENT_CHAT_ENABLED`、`PROCUREMENT_AUTO_SEND_ENABLED` 控制，
+两者默认均为 `false`；自动发送不能脱离聊天编排单独开启。置信度阈值默认 0.85，
+每会话自动发送上限硬限制为三轮。即使未来显式打开配置，模型输出仍须通过意图白名单、风险文本、
+最新消息、商品/卖家/账号、价格、DOM、冷却时间和唯一写锁等全部确定性检查。
+
+DeepSeek 草稿适配器不读取环境变量；worker 必须显式构造 `DeepSeekConfig` 并提供 API Key，默认使用
+`https://api.deepseek.com/chat/completions`、非流式 JSON Output 和关闭 thinking 的
+`deepseek-v4-flash`。密钥使用 `SecretStr`，模块不记录密钥、提示词、卖家原文或供应商错误正文。
+
+采购任务 API 使用与核验、Catalog Sync 分离的 `PROCUREMENT_API_TOKEN`，少于 32 字符按未配置处理并
+返回 503。回调另用 `SHOPPING_PROCUREMENT_TOKEN`，并和 DeepSeek 密钥一样只注入 scheduler-worker，
+不注入 API 容器；这些令牌不进入请求体、响应、浏览器、数据库或普通日志。
+
 ## 安全边界
 
-项目只访问公开商品搜索页面，不采集私聊、手机号、精确地址或其他非公开个人信息。验证码、登录失效、403/429、访问频繁和结构异常必须停止，禁止绕过、代理轮换或多账号续爬。
+当前采购任务 API 只读本地目录并写本地任务，不访问闲鱼页面。跨服务采购契约禁止日本客户姓名、
+手机号、精确地址和支付资料进入 x-comments。验证码、登录失效、403/429、
+访问频繁和结构异常必须停止，禁止绕过、代理轮换或多账号续爬。
 
-正式应用为同一进程的采集 worker 与结算核验器注入同一个 `asyncio.Lock`。等待锁也计入各自
-安全超时，因此同一登录态不会在定时采集与并发结算中被同时使用。核验器每次只导航一次，
-不会因超时、未知结构或风控自动重试。
+正式应用为 API 核验器与 scheduler worker 注入同一种 `XianyuAccountGuard`。它先用
+进程内 `asyncio.Lock` 阻止本进程并发，再用 PostgreSQL session-level advisory lock
+阻止两个容器同时使用同一登录态。等待锁仍计入各自安全超时；取消或连接断开时
+会释放锁或使连接失效，避免带锁连接回到连接池。SQLite 离线测试安全退化为进程内锁。
+核验器每次只导航一次，不会因超时、未知结构或风控自动重试。详见
+`docs/xianyu-account-guard.md`。
 
 ## 容器运行
 

@@ -4,22 +4,23 @@
 它属于应用入口，注册路由和元数据，不包含业务、解析或数据库查询实现。
 """
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import catalog_keywords, catalog_sync, crawl_jobs, demo, health, items
+from app.api import catalog_keywords, catalog_sync, crawl_jobs, demo, health, items, procurement
 from app.core.config import get_settings
 from app.core.database import SessionFactory
 from app.crawler.item_verifier import XianyuItemVerifier
+from app.jobs.procurement_worker import ProcurementBackgroundWorker
 from app.jobs.scheduler import CatalogScheduler
 from app.jobs.worker import CrawlWorker
 from app.repositories.catalog_keywords import CatalogKeywordRepository
 from app.repositories.jobs import JobRepository
 from app.services.item_verification import LiveItemVerifier
+from app.services.xianyu_account_guard import XianyuAccountGuard
 
 
 def create_app(
@@ -27,6 +28,7 @@ def create_app(
     item_verifier: LiveItemVerifier | None = None,
     verification_token: str | None = None,
     catalog_sync_token: str | None = None,
+    procurement_api_token: str | None = None,
 ) -> FastAPI:
     """
     创建 FastAPI 应用并注册版本化路由。
@@ -36,7 +38,7 @@ def create_app(
     """
 
     settings = get_settings()
-    account_lock = asyncio.Lock()
+    account_guard = XianyuAccountGuard(SessionFactory)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -50,15 +52,21 @@ def create_app(
             start_worker if start_worker is not None else settings.app_role == "scheduler_worker"
         )
         worker = (
-            CrawlWorker(SessionFactory, settings, account_lock) if should_start_worker else None
+            CrawlWorker(SessionFactory, settings, account_guard) if should_start_worker else None
         )
         scheduler = (
             CatalogScheduler(SessionFactory, worker, settings.catalog_scheduler_interval_seconds)
             if worker is not None
             else None
         )
+        procurement_worker = (
+            ProcurementBackgroundWorker(SessionFactory, settings, account_guard)
+            if should_start_worker
+            else None
+        )
         application.state.crawl_worker = worker
         application.state.catalog_scheduler = scheduler
+        application.state.procurement_worker = procurement_worker
         if worker is not None:
             with SessionFactory() as session:
                 CatalogKeywordRepository(session).ensure_defaults()
@@ -66,9 +74,13 @@ def create_app(
             worker.start()
         if scheduler is not None:
             scheduler.start()
+        if procurement_worker is not None:
+            procurement_worker.start()
         try:
             yield
         finally:
+            if procurement_worker is not None:
+                await procurement_worker.stop()
             if scheduler is not None:
                 await scheduler.stop()
             if worker is not None:
@@ -84,6 +96,7 @@ def create_app(
     application.include_router(crawl_jobs.router)
     application.include_router(items.router)
     application.include_router(catalog_sync.router)
+    application.include_router(procurement.router)
     application.include_router(catalog_keywords.router)
     application.include_router(demo.router)
     application.mount("/static", StaticFiles(directory=demo.STATIC_DIR), name="static")
@@ -96,8 +109,9 @@ def create_app(
     )
     if len(configured_token) < 32:
         configured_token = ""
-    application.state.xianyu_account_lock = account_lock
-    application.state.item_verifier = item_verifier or XianyuItemVerifier(settings, account_lock)
+    application.state.xianyu_account_guard = account_guard
+    application.state.xianyu_account_lock = account_guard
+    application.state.item_verifier = item_verifier or XianyuItemVerifier(settings, account_guard)
     application.state.item_verification_token = configured_token or None
     configured_sync_token = (
         catalog_sync_token.strip()
@@ -109,6 +123,16 @@ def create_app(
     if len(configured_sync_token) < 32:
         configured_sync_token = ""
     application.state.catalog_sync_token = configured_sync_token or None
+    configured_procurement_token = (
+        procurement_api_token.strip()
+        if procurement_api_token is not None
+        else settings.procurement_api_token.get_secret_value().strip()
+        if settings.procurement_api_token is not None
+        else ""
+    )
+    if len(configured_procurement_token) < 32:
+        configured_procurement_token = ""
+    application.state.procurement_api_token = configured_procurement_token or None
     return application
 
 

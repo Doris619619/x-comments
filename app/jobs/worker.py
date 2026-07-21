@@ -17,6 +17,7 @@ from app.models.catalog_sync import CrawlRunStatus
 from app.models.crawl_job import CrawlJob, CrawlJobStatus, utc_now
 from app.repositories.catalog_sync import CatalogSyncRepository
 from app.repositories.jobs import JobRepository
+from app.services.xianyu_account_guard import AccountGuardInput
 
 
 class CrawlWorker:
@@ -30,7 +31,7 @@ class CrawlWorker:
         self,
         session_factory: sessionmaker[Session],
         settings: Settings,
-        account_lock: asyncio.Lock | None = None,
+        account_lock: AccountGuardInput | None = None,
     ) -> None:
         """
         初始化空队列和爬虫依赖。

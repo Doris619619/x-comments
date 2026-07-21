@@ -393,6 +393,97 @@ Authorization: Bearer <CATALOG_SYNC_TOKEN>
 
 ---
 
+## 7. 本地采购执行任务（仅 shopping 服务端）
+
+以下接口均要求独立服务端令牌：
+
+```http
+Authorization: Bearer <PROCUREMENT_API_TOKEN>
+```
+
+令牌未配置或短于 32 字符返回 **503**，缺失或错误返回 **401**。它不能与
+`XIANYU_API_TOKEN`/`CATALOG_SYNC_TOKEN` 共用，不得进入浏览器、数据库、日志或 Git。
+
+### `POST /api/v1/procurement-tasks`
+
+请求还必须携带 16–128 字符的 `Idempotency-Key`。服务端对严格 Pydantic 规范化后的完整 body 计算
+SHA-256：同键同 body 返回原任务和原 `session_id`，同键不同 body 返回 **409**。
+
+```json
+{
+  "contract_version": 1,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "source": {
+    "platform": "xianyu",
+    "item_id": "1234567890",
+    "expected_seller_id": null
+  },
+  "expected_listing": {
+    "title": "格力空调遥控器",
+    "price_cny_minor": 1250,
+    "currency": "CNY",
+    "verified_at": "2026-07-20T10:00:00Z"
+  },
+  "objectives": ["availability", "function", "shipping_time"],
+  "policy": {
+    "max_auto_rounds": 3,
+    "response_deadline_at": "2026-07-21T10:00:00Z"
+  }
+}
+```
+
+请求不接受 `item_url`；服务端只从现有 `Item.item_url` 读取来源 URL。未知字段直接返回 **422**，因此
+日本客户姓名、电话、地址、支付资料等额外字段不能进入任务。创建前依次验证：
+
+1. Item 表存在该商品；
+2. 存在最新发布 Catalog 快照；
+3. `availability=active` 且 `currency=CNY`；
+4. 发布价格与 `price_cny_minor` 完全一致。
+
+成功在同一事务中创建本地执行任务和会话，返回 **202**：
+
+```json
+{
+  "contract_version": 1,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "session_id": "82dc9175-4ef1-43d6-b318-0b49e205ba2d",
+  "status": "pending_source_verification",
+  "next_action": "verify_source",
+  "created_at": "2026-07-20T10:00:01Z"
+}
+```
+
+| 状态码 | code/说明 |
+|--------|-----------|
+| 401 | 采购 Bearer 令牌缺失或错误 |
+| 404 | `source_item_not_found` |
+| 409 | `idempotency_conflict`、`task_id_conflict`、`source_not_active` 或 `source_price_changed` |
+| 422 | body、UUID、幂等键或额外字段不符合契约 |
+| 503 | 采购令牌未配置 |
+
+### `GET /api/v1/procurement-tasks/{task_id}`
+
+返回任务保存的来源商品 ID、标题/CNY 整数分、目标、轮次/期限、任务与会话状态、下一动作、脱敏摘要/
+原因和时间。响应不返回请求幂等键、body 哈希、内部租约或商品 URL。不存在返回 **404**。
+
+### `POST /api/v1/procurement-tasks/{task_id}/cancel`
+
+```json
+{"reason_code": "cancelled_by_shopping"}
+```
+
+将仍在执行的任务与会话同事务改为 `cancelled`，`next_action=none`；重复取消幂等。其他终态返回
+**409**。该操作只更新本地状态，不操作闲鱼页面、不购买、不付款。
+
+LLM 输出继续使用 `$id=procurement-chat-v1` 的 `ProcurementLlmOutput`：只能建议安全询问、进入审核、
+要求人工或停止，不存在 `confirm_purchase`。唯一 scheduler worker 可在双重功能开关显式开启后执行：
+订单/商品/卖家/价格核验、读取新卖家回复、调用 DeepSeek 生成严格草稿、确定性 policy 审核，以及最多
+三轮的单次脚本发送。DeepSeek 不能直接发送；policy 不通过、敏感信息、页面漂移、登录/风控、发送
+结果不确定都会转人工或终止。每个状态变化通过固定 `SHOPPING_CALLBACK_URL` 回调，使用独立
+`SHOPPING_PROCUREMENT_TOKEN`；商城按 `event_id` 幂等处理。存在未交付回调时不会继续下一次聊天动作。
+
+---
+
 ## 推荐调用顺序（闭环）
 
 ```text

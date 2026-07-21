@@ -25,6 +25,11 @@ from app.crawler.parser import parse_search_response
 from app.crawler.risk_control import RiskControlBlocked, detect_risk
 from app.crawler.selectors import NEXT_PAGE_BUTTON, SEARCH_API_FRAGMENT
 from app.schemas.item import ParsedItem
+from app.services.xianyu_account_guard import (
+    AccountAccessGuard,
+    AccountGuardInput,
+    normalize_account_guard,
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +52,7 @@ class XianyuCrawler:
     输入配置；网络、页面或结构错误向上抛出；副作用仅为有限页面访问。
     """
 
-    def __init__(self, settings: Settings, account_lock: asyncio.Lock | None = None) -> None:
+    def __init__(self, settings: Settings, account_lock: AccountGuardInput | None = None) -> None:
         """
         保存已校验配置。
 
@@ -56,6 +61,7 @@ class XianyuCrawler:
 
         self.settings = settings
         self.account_lock = account_lock or asyncio.Lock()
+        self.account_guard: AccountAccessGuard = normalize_account_guard(self.account_lock)
 
     async def collect(self, keyword: str) -> CrawlResult:
         """
@@ -64,7 +70,7 @@ class XianyuCrawler:
         输入关键词；返回解析结果；认证/风控抛出 RiskControlBlocked，其他错误向上抛出。
         """
 
-        async with self.account_lock:
+        async with self.account_guard.hold():
             state_path = Path(self.settings.xianyu_storage_state_path)
             if not state_path.is_file():
                 raise RiskControlBlocked("本地登录态文件不存在，需要人工重新登录")
