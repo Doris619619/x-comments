@@ -83,6 +83,7 @@ def test_item_api_contract_with_nullable_display_fields(
         title="测试发饰",
         price=Decimal("12.50"),
         image_url=None,
+        image_urls=[],
         item_url="https://www.goofish.com/item?id=10001",
         location=None,
         source="xianyu",
@@ -97,6 +98,7 @@ def test_item_api_contract_with_nullable_display_fields(
     assert item["title"] == "测试发饰"
     assert item["price"] == "12.50"
     assert item["image_url"] is None
+    assert item["image_urls"] == []
     assert item["location"] is None
     assert item["source"] == "xianyu"
     assert item["last_seen_at"]
@@ -166,6 +168,7 @@ def test_items_api_filters_by_catalog_category(
         title="测试手办",
         price=Decimal("28.00"),
         image_url=None,
+        image_urls=[],
         item_url="https://www.goofish.com/item?id=20001",
         location="上海",
     )

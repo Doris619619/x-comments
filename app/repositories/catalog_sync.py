@@ -228,6 +228,7 @@ class CatalogSyncRepository:
                     price=item.price,
                     currency="CNY",
                     image_url=item.image_url,
+                    image_urls=list(item.image_urls or []),
                     location=item.location,
                     last_seen_at=item.last_seen_at,
                     status_changed_at=self._latest_status_changed_at(item_id, item.updated_at),

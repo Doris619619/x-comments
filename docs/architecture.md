@@ -23,7 +23,7 @@ HTTP 请求
 商城同步（Goal Merge 2）
   → shopping 的独立同步容器每 10 分钟经共享 Docker 私有网络调用带 Bearer 认证的 Catalog Sync API
   → GET /api/v1/catalog-sync/changes?after_revision=...
-  → shopping 自己的商品镜像和持久化游标
+  → shopping 自己的商品镜像和持久化游标（含最多九张的公开详情图库）
   → app/api → repositories → x-comments PostgreSQL
 
 商城结算核验

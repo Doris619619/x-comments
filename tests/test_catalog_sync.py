@@ -31,6 +31,7 @@ def make_item(item_id: str = "90001") -> ParsedItem:
         title=f"同步测试商品 {item_id}",
         price=Decimal("12.50"),
         image_url=None,
+        image_urls=[],
         item_url=f"https://www.goofish.com/item?id={item_id}",
         location="上海",
     )
@@ -117,12 +118,14 @@ def test_catalog_sync_api_requires_token_and_returns_incremental_contract(
     assert body["to_revision"] == revision
     assert body["changes"][0]["availability"] == "active"
     assert body["changes"][0]["currency"] == "CNY"
+    assert body["changes"][0]["image_urls"] == []
     assert "item_url" not in body["changes"][0]
 
     snapshot = client.get("/api/v1/catalog-sync/items?page=1&page_size=100", headers=SYNC_HEADERS)
     assert snapshot.status_code == 200
     assert snapshot.json()["total"] == 1
     assert snapshot.json()["items"][0]["item_id"] == "90002"
+    assert snapshot.json()["items"][0]["image_urls"] == []
 
     item = client.get("/api/v1/catalog-sync/items/90002", headers=SYNC_HEADERS)
     assert item.status_code == 200

@@ -7,7 +7,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 class ParsedItem(BaseModel):
@@ -21,6 +21,7 @@ class ParsedItem(BaseModel):
     title: str = Field(min_length=1)
     price: Decimal = Field(ge=0)
     image_url: HttpUrl | None = None
+    image_urls: list[HttpUrl] = Field(default_factory=list, max_length=9)
     item_url: HttpUrl
     location: str | None = None
     source: str = "xianyu"
@@ -39,6 +40,20 @@ class ParsedItem(BaseModel):
             raise ValueError("标题不能为空")
         return cleaned
 
+    @model_validator(mode="after")
+    def align_cover_image(self) -> "ParsedItem":
+        """
+        让兼容旧契约的主图字段始终与图库首图保持一致。
+
+        返回：补齐后的当前解析商品；无异常和外部副作用。
+        """
+
+        if self.image_urls:
+            self.image_url = self.image_urls[0]
+        elif self.image_url is not None:
+            self.image_urls = [self.image_url]
+        return self
+
 
 class ItemRead(BaseModel):
     """
@@ -53,6 +68,7 @@ class ItemRead(BaseModel):
     title: str
     price: Decimal
     image_url: str | None
+    image_urls: list[str]
     item_url: str
     location: str | None
     source: str

@@ -21,9 +21,10 @@ from playwright.async_api import (
 )
 
 from app.core.config import Settings
+from app.crawler.detail_images import normalize_detail_image_urls
 from app.crawler.parser import parse_search_response
 from app.crawler.risk_control import RiskControlBlocked, detect_risk
-from app.crawler.selectors import NEXT_PAGE_BUTTON, SEARCH_API_FRAGMENT
+from app.crawler.selectors import DETAIL_IMAGE_SELECTORS, NEXT_PAGE_BUTTON, SEARCH_API_FRAGMENT
 from app.schemas.item import ParsedItem
 from app.services.xianyu_account_guard import (
     AccountAccessGuard,
@@ -118,8 +119,10 @@ class XianyuCrawler:
                 parsed, page_errors = parse_search_response(payload)
                 if not parsed:
                     raise RiskControlBlocked("搜索结果为空或结构异常，无法确认采集正常")
-                all_items.extend(parsed)
+                detailed_items, detail_errors = await self._enrich_detail_images(context, parsed)
+                all_items.extend(detailed_items)
                 errors.extend(page_errors)
+                errors.extend(detail_errors)
                 pages_visited += 1
                 unique_items = {item.item_id: item for item in all_items}
                 if len(unique_items) >= self.settings.xianyu_max_items:
@@ -127,6 +130,87 @@ class XianyuCrawler:
                     break
                 payload = await self._next_page(page, search_responses)
             return CrawlResult(items=all_items, errors=errors, pages_visited=pages_visited)
+        finally:
+            await page.close()
+
+    async def _enrich_detail_images(
+        self, context: BrowserContext, items: list[ParsedItem]
+    ) -> tuple[list[ParsedItem], list[str]]:
+        """
+        顺序读取搜索结果中每件商品的公开详情图库。
+
+        参数：
+            context: 与搜索页共用登录态的浏览器上下文。
+            items: 已从搜索响应解析出的商品。
+
+        返回：
+            带详情图库的商品及每件非风控失败的错误信息。
+
+        异常：
+            RiskControlBlocked: 出现登录失效、403/429 或风控时立即向上停止整次任务。
+
+        副作用：
+            对每件商品最多打开一次公开详情页。
+        """
+
+        enriched: list[ParsedItem] = []
+        errors: list[str] = []
+        for item in items:
+            try:
+                enriched.append(await self._read_detail_images(context, item))
+            except RiskControlBlocked:
+                raise
+            except (PlaywrightTimeoutError, ValueError) as exc:
+                enriched.append(item)
+                errors.append(f"item {item.item_id} detail images: {type(exc).__name__}")
+        return enriched, errors
+
+    async def _read_detail_images(self, context: BrowserContext, item: ParsedItem) -> ParsedItem:
+        """
+        访问一次商品详情页并提取其公开图库。
+
+        参数：
+            context: 已认证浏览器上下文。
+            item: 搜索页解析的单件商品，包含兼容用首图。
+
+        返回：
+            以详情图库首图更新后的解析商品。
+
+        异常：
+            RiskControlBlocked: 页面出现登录或风控信号时抛出。
+            ValueError: 未获得任何可用公开图片时抛出。
+            PlaywrightTimeoutError: 页面访问超时时抛出。
+
+        副作用：
+            创建、访问并关闭一个详情页。
+        """
+
+        page = await context.new_page()
+        try:
+            response = await page.goto(
+                str(item.item_url),
+                wait_until="domcontentloaded",
+                timeout=self.settings.xianyu_verify_timeout_seconds * 1_000,
+            )
+            await self._assert_safe(page, response.status if response is not None else None)
+            image_nodes = page.locator(", ".join(DETAIL_IMAGE_SELECTORS))
+            await image_nodes.first.wait_for(
+                state="attached",
+                timeout=self.settings.xianyu_verify_timeout_seconds * 1_000,
+            )
+            raw_urls = await image_nodes.evaluate_all(
+                """nodes => nodes.map(node =>
+                    node.currentSrc || node.getAttribute('src') ||
+                    node.getAttribute('data-src') || ''
+                )"""
+            )
+            if not isinstance(raw_urls, list):
+                raise ValueError("详情图库节点格式异常")
+            normalized_urls = normalize_detail_image_urls(raw_urls)
+            image_urls = normalized_urls[: self.settings.xianyu_max_images_per_item]
+            if not image_urls:
+                raise ValueError("详情页未返回公开图库")
+            return item.model_copy(update={"image_url": image_urls[0], "image_urls": image_urls})
         finally:
             await page.close()
 

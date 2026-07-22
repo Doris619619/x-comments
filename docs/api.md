@@ -163,6 +163,7 @@ scheduler-worker 会从持久化队列原子认领任务，因此 API 与 worker
       "title": "蝴蝶结发夹",
       "price": "12.50",
       "image_url": "https://example.com/a.jpg",
+      "image_urls": ["https://example.com/a.jpg", "https://example.com/b.jpg"],
       "item_url": "https://www.goofish.com/item?id=123456789012",
       "location": "上海",
       "source": "xianyu",
@@ -193,7 +194,8 @@ scheduler-worker 会从持久化队列原子认领任务，因此 API 与 worker
 | item_id | string | 闲鱼商品唯一 ID |
 | title | string | 标题 |
 | price | decimal string | `NUMERIC(12,2)` 序列化结果，如 `"12.50"` |
-| image_url | string \| null | 主图；缺失为 `null`，不伪造 |
+| image_url | string \| null | 兼容旧调用方的首图；缺失为 `null` |
+| image_urls | string[] | 最多九张详情公开图库；首项与 `image_url` 相同，缺图为 `[]` |
 | item_url | string | 商品链接 |
 | location | string \| null | 公开地区；缺失为 `null` |
 | source | string | 来源，当前为 `xianyu` |
@@ -206,7 +208,8 @@ scheduler-worker 会从持久化队列原子认领任务，因此 API 与 worker
 
 商城服务应从其服务器端调用 `GET /api/v1/items` 和 `GET /api/v1/items/{item_id}`，并将
 `item_id` 作为稳定外部标识。列表和详情可安全读取 `item_id`、`title`、`price`、`image_url`、
-`location`、`last_seen_at` 与 `source`；`image_url`、`location` 允许为 `null`，调用方必须降级展示。
+`image_urls`、`location`、`last_seen_at` 与 `source`；`image_urls` 最多九项，调用方必须为 `[]`、
+`image_url=null` 与 `location=null` 提供降级展示。
 本 POC 不设置宽松 CORS，也不允许将服务端地址或未来鉴权信息暴露给浏览器。
 
 商城首页可用 `category=潮玩手办`、`category=实用小物` 或 `category=怀旧收藏` 筛选。分类由
@@ -340,6 +343,7 @@ Authorization: Bearer <CATALOG_SYNC_TOKEN>
       "price": "12.50",
       "currency": "CNY",
       "image_url": null,
+      "image_urls": [],
       "location": "上海",
       "last_seen_at": "2026-07-16T09:50:00+00:00",
       "status_changed_at": "2026-07-16T10:00:00+00:00"
