@@ -156,7 +156,8 @@ ORM：`Enum(CrawlJobStatus, native_enum=False)` → **不创建**数据库原生
 | `item_id` | `String(64)` | NOT NULL | — | 主键；闲鱼商品唯一 ID |
 | `title` | `Text` | NOT NULL | — | 标题 |
 | `price` | `Numeric(12, 2)` | NOT NULL | — | 价格，避免浮点误差 |
-| `image_url` | `Text` | NULL | — | 主图 URL；缺失为 `NULL`，不伪造 |
+| `image_url` | `Text` | NULL | — | 兼容旧调用方的图库首图；缺失为 `NULL` |
+| `image_urls` | `JSON` | NOT NULL | `[]` | 最多九张的详情公开图库；旧数据由首图回填 |
 | `item_url` | `Text` | NOT NULL | — | 商品链接 |
 | `location` | `String(100)` | NULL | — | 公开地区；缺失为 `NULL` |
 | `source` | `String(32)` | NOT NULL | `server_default='xianyu'`；ORM 默认 `"xianyu"` | 来源 |
@@ -351,6 +352,7 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 | `20260716_0004` | `alembic/versions/20260716_0004_catalog_sync.py` | 创建采集批次、缺失状态、revision 和变更事件表 |
 | `20260716_0005` | `alembic/versions/20260716_0005_unique_inflight_keyword.py` | 创建 PostgreSQL 同关键词 pending/running 部分唯一索引 |
 | `20260720_0006` | `alembic/versions/20260720_0006_procurement_chat_core.py` | 创建本地采购执行任务、聊天会话、消息、审计和事务 Outbox 表 |
+| `20260722_0007` | `alembic/versions/20260722_0007_catalog_image_urls.py` | 为商品与 Catalog Sync 快照增加最多九张的详情图库，并由旧首图回填 |
 
 ```bash
 alembic upgrade head    # 应用迁移

@@ -8,6 +8,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from app.crawler.detail_images import normalize_detail_image_urls
 from app.crawler.parser import parse_search_response
 
 
@@ -26,6 +27,30 @@ def test_parse_fixture() -> None:
     assert items[0].title == "蝴蝶结 发夹"
     assert items[0].price == Decimal("12.80")
     assert str(items[0].image_url) == "https://example.invalid/item-10001.jpg"
+    assert [str(url) for url in items[0].image_urls] == [
+        "https://example.invalid/item-10001.jpg"
+    ]
+
+
+def test_normalizes_deduplicates_and_limits_detail_images() -> None:
+    """
+    验证详情图库会忽略非法地址、去掉片段并保留前九张公开图片。
+
+    无输入；断言失败时抛出 AssertionError；无外部副作用。
+    """
+
+    values = [
+        "//img.example.invalid/first.jpg#preview",
+        "https://img.example.invalid/first.jpg",
+        "data:image/png;base64,unsafe",
+        "javascript:alert(1)",
+        *[f"https://img.example.invalid/{index}.jpg" for index in range(2, 12)],
+    ]
+
+    assert normalize_detail_image_urls(values) == [
+        "https://img.example.invalid/first.jpg",
+        *[f"https://img.example.invalid/{index}.jpg" for index in range(2, 10)],
+    ]
 
 
 def test_rejects_mismatched_id() -> None:

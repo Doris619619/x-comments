@@ -7,7 +7,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Numeric, String, Text
+from sqlalchemy import JSON, DateTime, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -27,6 +27,7 @@ class Item(Base):
     title: Mapped[str] = mapped_column(Text)
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     image_url: Mapped[str | None] = mapped_column(Text)
+    image_urls: Mapped[list[str]] = mapped_column(JSON, default=list)
     item_url: Mapped[str] = mapped_column(Text)
     location: Mapped[str | None] = mapped_column(String(100))
     source: Mapped[str] = mapped_column(String(32), default="xianyu")

@@ -79,13 +79,16 @@ class ItemRepository:
                     duplicate += 1
                     continue
                 seen_ids.add(parsed.item_id)
+                image_urls = [str(url) for url in parsed.image_urls]
+                image_url = image_urls[0] if image_urls else None
                 existing = self.session.get(Item, parsed.item_id)
                 if existing is None:
                     existing = Item(
                         item_id=parsed.item_id,
                         title=parsed.title,
                         price=parsed.price,
-                        image_url=str(parsed.image_url) if parsed.image_url else None,
+                        image_url=image_url,
+                        image_urls=image_urls,
                         item_url=str(parsed.item_url),
                         location=parsed.location,
                         source=parsed.source,
@@ -100,14 +103,16 @@ class ItemRepository:
                             existing.title != parsed.title,
                             existing.price != parsed.price,
                             existing.image_url
-                            != (str(parsed.image_url) if parsed.image_url else None),
+                            != image_url,
+                            list(existing.image_urls or []) != image_urls,
                             existing.item_url != str(parsed.item_url),
                             existing.location != parsed.location,
                         )
                     )
                     existing.title = parsed.title
                     existing.price = parsed.price
-                    existing.image_url = str(parsed.image_url) if parsed.image_url else None
+                    existing.image_url = image_url
+                    existing.image_urls = image_urls
                     existing.item_url = str(parsed.item_url)
                     existing.location = parsed.location
                     existing.last_seen_at = seen_at

@@ -8,6 +8,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from urllib.parse import parse_qs, urlparse
 
+from app.crawler.detail_images import normalize_detail_image_urls
 from app.schemas.item import ParsedItem
 
 
@@ -105,15 +106,15 @@ def parse_search_response(payload: dict[str, object]) -> tuple[list[ParsedItem],
                 response_id = url_id or ""
             if not response_id or (url_id and url_id != response_id):
                 raise ItemParseError("商品 ID 缺失或与链接不一致")
-            image = str(content.get("picUrl") or "").strip() or None
-            if image and image.startswith("//"):
-                image = f"https:{image}"
+            image_urls = normalize_detail_image_urls([content.get("picUrl")])
+            image = image_urls[0] if image_urls else None
             parsed.append(
                 ParsedItem(
                     item_id=response_id,
                     title=str(content.get("title") or ""),
                     price=_parse_price(content.get("price")),
                     image_url=image,
+                    image_urls=image_urls,
                     item_url=item_url,
                     location=str(content.get("area") or "").strip() or None,
                 )

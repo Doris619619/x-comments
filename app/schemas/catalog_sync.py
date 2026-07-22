@@ -40,6 +40,7 @@ class CatalogChangeRead(BaseModel):
     price: Decimal
     currency: str
     image_url: str | None
+    image_urls: list[str]
     location: str | None
     last_seen_at: datetime
     status_changed_at: datetime
@@ -72,6 +73,7 @@ class CatalogSyncItemRead(BaseModel):
     price: Decimal
     currency: str
     image_url: str | None
+    image_urls: list[str]
     location: str | None
     last_seen_at: datetime
     status_changed_at: datetime

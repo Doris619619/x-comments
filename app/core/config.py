@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     xianyu_headless: bool = True
     xianyu_max_pages: int = Field(default=3, ge=1, le=3)
     xianyu_max_items: int = Field(default=50, ge=1, le=50)
+    xianyu_max_images_per_item: int = Field(default=9, ge=1, le=9)
     xianyu_page_delay_seconds: float = Field(default=2.0, ge=1.0, le=10.0)
     xianyu_collect_timeout_seconds: int = Field(default=120, ge=30, le=300)
     xianyu_verify_timeout_seconds: int = Field(default=12, ge=5, le=30)

@@ -30,6 +30,7 @@ def make_item(item_id: str = "10001") -> ParsedItem:
         title=f"发饰 {item_id}",
         price=Decimal("12.80"),
         image_url=f"https://example.invalid/{item_id}.jpg",
+        image_urls=[f"https://example.invalid/{item_id}.jpg"],
         item_url=f"https://www.goofish.com/item?id={item_id}",
         location="杭州",
     )

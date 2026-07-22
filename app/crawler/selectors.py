@@ -37,3 +37,13 @@ DETAIL_PRICE_SELECTORS = (
     "main [class*='item-price']",
     "main [class*='price--']",
 )
+
+# 商品详情页图片选择器仅用于读取公开图库，不匹配头像、按钮图标或聊天附件。
+DETAIL_IMAGE_SELECTORS = (
+    "main [class*='gallery'] img",
+    "main [class*='Gallery'] img",
+    "main [class*='image-list'] img",
+    "main [class*='ImageList'] img",
+    "main [class*='detail-image'] img",
+    "main [class*='DetailImage'] img",
+)
