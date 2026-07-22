@@ -11,6 +11,7 @@ import pytest
 from app.core.config import Settings
 from app.crawler.client import XianyuCrawler
 from app.crawler.risk_control import RiskControlBlocked
+from app.crawler.selectors import DETAIL_IMAGE_SELECTORS
 from app.schemas.item import ParsedItem
 
 
@@ -31,6 +32,19 @@ class _Locator:
 
         self.text = text
         self.image_urls = image_urls
+        self.wait_calls = 0
+
+    @property
+    def first(self) -> "_Locator":
+        """返回首个节点替身以匹配 Playwright Locator 接口；无副作用。"""
+
+        return self
+
+    async def wait_for(self, state: str, timeout: int) -> None:
+        """记录图库节点等待；参数只匹配真实接口，不执行异步等待。"""
+
+        del state, timeout
+        self.wait_calls += 1
 
     async def inner_text(self, timeout: int) -> str:
         """返回页面正文；timeout 仅匹配真实接口，未使用且无副作用。"""
@@ -56,6 +70,7 @@ class _Page:
         self.status = status
         self.url = "https://www.goofish.com/item?id=10001"
         self.closed = False
+        self.detail_locator = _Locator(text, image_urls)
 
     async def goto(self, url: str, wait_until: str, timeout: int) -> _Response:
         """返回预设响应；输入仅匹配真实接口，未访问网络。"""
@@ -66,7 +81,9 @@ class _Page:
     def locator(self, selector: str) -> _Locator:
         """按 body 或图库选择器返回预设节点；无异常和副作用。"""
 
-        return _Locator(self.text, [] if selector == "body" else self.image_urls)
+        if selector == "body":
+            return _Locator(self.text, [])
+        return self.detail_locator
 
     async def close(self) -> None:
         """标记页面已关闭；无返回和外部副作用。"""
@@ -100,6 +117,12 @@ def _item() -> ParsedItem:
     )
 
 
+def test_detail_image_selectors_include_current_public_gallery_node() -> None:
+    """验证真实详情页的公开图库类名不会被 main 范围限制排除。"""
+
+    assert "img[class*='fadeInImg']" in DETAIL_IMAGE_SELECTORS
+
+
 @pytest.mark.asyncio
 async def test_detail_images_normalize_deduplicate_and_preserve_cover_contract() -> None:
     """验证详情图库以详情首图覆盖搜索首图、去重并在关闭页面后返回。"""
@@ -121,6 +144,7 @@ async def test_detail_images_normalize_deduplicate_and_preserve_cover_contract()
         "https://img.example.invalid/detail-two.jpg",
     ]
     assert str(result.image_url) == "https://img.example.invalid/detail-one.jpg"
+    assert page.detail_locator.wait_calls == 1
     assert page.closed is True
 
 

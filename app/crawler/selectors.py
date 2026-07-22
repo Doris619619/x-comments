@@ -39,7 +39,9 @@ DETAIL_PRICE_SELECTORS = (
 )
 
 # 商品详情页图片选择器仅用于读取公开图库，不匹配头像、按钮图标或聊天附件。
+# 当前真实详情页不包含 main，公开主图和缩略图使用 CSS Modules 的 fadeInImg 类。
 DETAIL_IMAGE_SELECTORS = (
+    "img[class*='fadeInImg']",
     "main [class*='gallery'] img",
     "main [class*='Gallery'] img",
     "main [class*='image-list'] img",

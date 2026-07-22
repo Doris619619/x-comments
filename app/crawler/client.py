@@ -194,6 +194,10 @@ class XianyuCrawler:
             )
             await self._assert_safe(page, response.status if response is not None else None)
             image_nodes = page.locator(", ".join(DETAIL_IMAGE_SELECTORS))
+            await image_nodes.first.wait_for(
+                state="attached",
+                timeout=self.settings.xianyu_verify_timeout_seconds * 1_000,
+            )
             raw_urls = await image_nodes.evaluate_all(
                 """nodes => nodes.map(node =>
                     node.currentSrc || node.getAttribute('src') ||
