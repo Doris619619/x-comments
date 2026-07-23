@@ -26,6 +26,7 @@ from app.crawler.chat_client import (
 )
 from app.crawler.chat_selectors import (
     BODY_SELECTOR,
+    CHAT_ENTRY_WAIT_MILLISECONDS,
     CHAT_INPUT_SELECTOR,
     CHAT_MESSAGE_LIST_SELECTOR,
     CHAT_MESSAGE_SELECTOR,
@@ -214,6 +215,7 @@ class FakePage:
         self.nodes_by_selector = nodes_by_selector
         self.context = FakeContext(account_id)
         self.context.pages.append(self)
+        self.wait_for_selector_calls: list[tuple[str, str, float]] = []
 
     def locator(self, selector: str) -> FakeLocator:
         """
@@ -232,6 +234,22 @@ class FakePage:
         """
 
         del timeout
+
+    async def wait_for_selector(
+        self,
+        selector: str,
+        *,
+        state: str,
+        timeout: float,
+    ) -> FakeLocator:
+        """
+        记录延迟入口等待并返回对应离线 locator。
+
+        输入集中选择器、状态与毫秒时限；返回内存 locator；没有网络或真实等待副作用。
+        """
+
+        self.wait_for_selector_calls.append((selector, state, timeout))
+        return self.locator(selector)
 
     async def wait_for_load_state(
         self,
@@ -427,6 +445,21 @@ async def test_discovers_seller_and_accepts_hashed_account_binding() -> None:
     assert binding.seller_id == "seller-200"
     assert binding.account_id == expected_fingerprint
     assert environment.open_node.click_count == 0
+    assert environment.page.wait_for_selector_calls == [
+        (OPEN_CHAT_SELECTOR, "visible", CHAT_ENTRY_WAIT_MILLISECONDS)
+    ]
+
+
+def test_open_chat_selector_excludes_generic_sidebar_message_link() -> None:
+    """
+    验证聊天入口同时限定主商品 want 控件和完整 IM 身份参数。
+
+    无输入；断言失败抛出 AssertionError；只检查集中选择器字符串，不访问页面或网络。
+    """
+
+    assert "want--" in OPEN_CHAT_SELECTOR
+    assert "itemId=" in OPEN_CHAT_SELECTOR
+    assert "peerUserId=" in OPEN_CHAT_SELECTOR
 
 
 def test_message_fingerprint_is_stable_after_text_normalization() -> None:

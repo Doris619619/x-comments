@@ -8,8 +8,12 @@
 
 BODY_SELECTOR = "body"
 
-# 商品页只有同时携带商品和对端用户参数的 IM 链接，才可能成为受控聊天入口。
-OPEN_CHAT_SELECTOR = "a[href*='/im?'][href*='itemId='][href*='peerUserId=']"
+# 商品页同时存在侧栏“消息”和主商品“聊一聊”两个 IM 链接。只有主商品 want 控件且
+# 同时携带商品与对端用户参数时才可作为受控入口，禁止回退到全页任意 /im 链接。
+OPEN_CHAT_SELECTOR = (
+    "a[class*='want--'][href*='/im?'][href*='itemId='][href*='peerUserId=']"
+)
+CHAT_ENTRY_WAIT_MILLISECONDS = 8_000
 CHAT_PANEL_SELECTOR = "main[class*='chat-main--']"
 CHAT_MESSAGE_LIST_SELECTOR = "div[class*='message-list-reverse--']"
 CHAT_INPUT_SELECTOR = "textarea[placeholder='请输入消息，按Enter键发送或点击发送按钮发送']"

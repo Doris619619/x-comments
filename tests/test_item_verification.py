@@ -13,15 +13,19 @@ from typing import cast
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from playwright.async_api import Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.crawler.item_verifier import (
+    DETAIL_PRICE_WAIT_MAX_MILLISECONDS,
     XianyuItemVerifier,
     find_explicit_unavailable_signal,
     page_matches_target,
     parse_single_price_text,
 )
+from app.crawler.selectors import DETAIL_PRIMARY_PRICE_SELECTOR
 from app.jobs.worker import CrawlWorker
 from app.repositories.items import ItemRepository
 from app.schemas.item import ParsedItem
@@ -98,6 +102,38 @@ class SerialProbeVerifier(XianyuItemVerifier):
             )
         finally:
             self.active -= 1
+
+
+class FakeDelayedDetailPage:
+    """
+    记录详情价格等待参数，并可模拟客户端渲染超时。
+
+    输入是否超时；wait_for_selector 无网络副作用，只保存调用并按配置返回或抛出。
+    """
+
+    def __init__(self, *, should_timeout: bool) -> None:
+        """保存超时模式并初始化空调用列表；不访问浏览器或网络。"""
+
+        self.should_timeout = should_timeout
+        self.calls: list[tuple[str, str, float]] = []
+
+    async def wait_for_selector(
+        self,
+        selector: str,
+        *,
+        state: str,
+        timeout: float,
+    ) -> object | None:
+        """
+        记录选择器、状态和等待时限。
+
+        输入 Playwright 兼容参数；正常返回占位对象，超时模式抛出固定异常；无外部副作用。
+        """
+
+        self.calls.append((selector, state, timeout))
+        if self.should_timeout:
+            raise PlaywrightTimeoutError("offline delayed detail fixture")
+        return object()
 
 
 def seed_item(session_factory: sessionmaker[Session], item_id: str = "31001") -> None:
@@ -276,6 +312,34 @@ def test_visible_page_classification_is_conservative() -> None:
     assert page_matches_target("https://www.goofish.com/item?id=31001", "31001")
     assert not page_matches_target("https://www.goofish.com/search?q=31001", "31001")
     assert not page_matches_target("https://example.com/item?id=31001", "31001")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("should_timeout", [False, True])
+async def test_detail_price_wait_is_bounded_and_keeps_primary_selector(
+    should_timeout: bool,
+) -> None:
+    """
+    验证延迟详情只等待主商品价格，且节点缺失不会触发导航重试或异常外泄。
+
+    输入超时模式；断言失败抛出 AssertionError；只使用内存假页面，不访问闲鱼。
+    """
+
+    settings = Settings(xianyu_verify_timeout_seconds=12)
+    verifier = XianyuItemVerifier(settings)
+    page = FakeDelayedDetailPage(should_timeout=should_timeout)
+
+    await verifier._wait_for_primary_price(cast(Page, page))  # noqa: SLF001
+
+    assert page.calls == [
+        (
+            DETAIL_PRIMARY_PRICE_SELECTOR,
+            "visible",
+            DETAIL_PRICE_WAIT_MAX_MILLISECONDS,
+        )
+    ]
+    assert "item-main-info--" in DETAIL_PRIMARY_PRICE_SELECTOR
+    assert "value--" in DETAIL_PRIMARY_PRICE_SELECTOR
 
 
 def test_verify_api_requires_configured_bearer_token(client: TestClient) -> None:

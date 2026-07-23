@@ -21,6 +21,7 @@ from playwright.async_api import Locator, Page, Response
 from app.crawler.chat_selectors import (
     ACCOUNT_IDENTITY_COOKIE_NAME,
     BODY_SELECTOR,
+    CHAT_ENTRY_WAIT_MILLISECONDS,
     CHAT_INPUT_SELECTOR,
     CHAT_MESSAGE_LIST_SELECTOR,
     CHAT_MESSAGE_SELECTOR,
@@ -426,6 +427,12 @@ async def discover_chat_binding(
             raise ChatSafetyError("item_url_mismatch", "当前 URL 与绑定闲鱼商品不一致")
 
         await _assert_account_cookie_identity(page, expected_account_id)
+        # 主商品“聊一聊”由客户端延迟渲染；只等待绑定 IM 的 want 控件，不匹配侧栏消息入口。
+        await page.wait_for_selector(
+            OPEN_CHAT_SELECTOR,
+            state="visible",
+            timeout=CHAT_ENTRY_WAIT_MILLISECONDS,
+        )
         entry = await _unique_visible_locator(page, OPEN_CHAT_SELECTOR, "聊天入口")
         entry_text = normalize_chat_text(await entry.inner_text(timeout=2_000))
         if entry_text != "聊一聊":

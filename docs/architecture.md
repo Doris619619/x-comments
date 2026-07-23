@@ -33,7 +33,9 @@ HTTP 请求
   → Next.js 服务器携带 Bearer 令牌
   → POST /api/v1/items/{item_id}/verify
   → app/api 鉴权 → app/services 存在性与价格比较
-  → app/crawler 单次详情访问 → 五状态失败关闭响应
+  → app/crawler 单次详情访问
+  → 在总核验预算内等待客户端渲染的主商品信息区价格
+  → 五状态失败关闭响应
 
 杂货铺定时采集（Goal 4）
   → catalog_keywords 持久化搜索清单
@@ -60,6 +62,9 @@ HTTP 请求
   允许 shopping 服务端通过独立令牌创建、查询和取消本地执行记录。
 - `app/services/item_verification.py`：只依赖商品存在性协议和实时核验协议，不依赖 ORM 模型。
 - `app/crawler/item_verifier.py`：单次详情身份、风险、不可售文案和当前价格核验；不写数据库。
+  当前真实详情页不使用稳定的 `main` 标签，核验器只等待并读取
+  `item-main-info` 容器内的唯一主价格，避免把下方推荐商品价格当成目标商品价格；等待后会再次检查
+  登录/风控与明确下架文案，节点缺失仍返回 unknown，不放宽身份或价格门禁。
 - `app/models/procurement.py`：本地采购执行任务、会话、消息、追加审计和事务 Outbox。
 - `app/schemas/procurement.py` / `procurement_llm.py`：商城任务、回调事件和 LLM JSON 的严格契约；
   未知字段直接拒绝，模型不能输出购买或付款动作。
@@ -107,6 +112,10 @@ HTTP 请求
 消息误认为本次回复；读取时保存基线后的全部新消息，并把页面的 `column-reverse` DOM 顺序还原为
 时间正序。回复轮询按 2、5、10 分钟及后续每 15 分钟退避，最长 24 小时。编排器和投递器只在唯一
 `scheduler_worker` 角色运行。
+
+真实商品页的主“聊一聊”和侧栏“消息”都会指向 `/im`。页面适配器必须等待客户端渲染完成，并只
+接受带 `want--` 类、完整 `itemId`/`peerUserId` 且文案仍为“聊一聊”的唯一链接；侧栏消息入口即使
+带同样参数也不能用于发现卖家绑定。
 
 商品解析优先使用页面正常访问触发的搜索响应 JSON。解析器验证响应 `itemId` 与商品 URL `item?id=` 一致，任何不一致记录都不会入库。
 
