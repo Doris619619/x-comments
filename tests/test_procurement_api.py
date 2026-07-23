@@ -450,6 +450,40 @@ def test_create_rejects_latest_published_snapshot_that_is_not_active(
     assert task_count == 0
 
 
+def test_create_accepts_curated_snapshot_that_is_only_suspected_missing(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    """
+    验证彦诗筛选商品仅因搜索轮询暂时缺失时仍可创建任务。
+
+    输入客户端和隔离数据库；断言任务创建成功；副作用仅限测试数据库，不访问闲鱼或发送消息。
+    """
+
+    seed_active_catalog_item(session_factory, item_id="81008")
+    with session_factory() as session:
+        latest = session.scalar(
+            select(CatalogChange)
+            .where(CatalogChange.item_id == "81008")
+            .order_by(CatalogChange.revision.desc())
+            .limit(1)
+        )
+        assert latest is not None
+        latest.availability = CatalogAvailability.SUSPECTED_MISSING
+        session.commit()
+
+    response = client.post(
+        "/api/v1/procurement-tasks",
+        json=procurement_payload(item_id="81008", contract_version=2),
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-curated-missing-test-0001",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "pending_source_verification"
+
+
 def test_create_rejects_extra_customer_pii_and_item_url(client: TestClient) -> None:
     """
     验证创建契约对额外客户地址和调用方商品 URL 返回 422。

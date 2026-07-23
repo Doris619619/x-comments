@@ -6,16 +6,17 @@ x-comments 使用 PostgreSQL，shopping 使用 MongoDB；shopping 只经 Docker 
 
 兼容旧 v1 调用方时，可配置 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 为英文逗号分隔的闲鱼
 `item_id`；留空只会拒绝 v1，不会给 v2 增加权限。v2 Canary 由商城 Root 手工复输商品 ID 后逐任务
-授权。POC 阶段 `PROCUREMENT_CHAT_ENABLED=false`、`PROCUREMENT_AUTO_SEND_ENABLED=false`
-保持关闭。以后仅做一个白名单商品的低流量 Canary 时，也必须人工复核商品 ID 与商城任务级授权，
+授权。当前生产 `PROCUREMENT_CHAT_ENABLED=true` 用于受控草稿验收，
+`PROCUREMENT_AUTO_SEND_ENABLED=false` 保持关闭。仅做一个白名单商品的低流量 Canary 时，
+也必须人工复核商品 ID 与商城任务级授权，
 且不得把客户资料、支付资料、Cookie 或账号密码写入环境变量。
 
 ## 采购聊天部署与只读标定
 
-先部署数据库迁移和代码，但保持下面两个生产开关关闭：
+初次部署数据库迁移和代码时两个开关都关闭；完成只读标定和草稿验收后，生产基线为：
 
 ```dotenv
-PROCUREMENT_CHAT_ENABLED=false
+PROCUREMENT_CHAT_ENABLED=true
 PROCUREMENT_AUTO_SEND_ENABLED=false
 ```
 
@@ -42,13 +43,13 @@ xvfb-run -a python scripts/calibrate_procurement_chat_dom.py \
 身份或聊天内容。遇到登录失效、验证码、403、429、商品/卖家/账号不一致或 DOM 不唯一时立即停止。
 
 回复轮询按“发送后 2 分钟、5 分钟、10 分钟、此后每 15 分钟”退避，最长等待 24 小时。每次读取
-基线后的全部新消息，不只取最后一条。只有首次发送和准备再次发送前重新核验商品价格与可售状态；
-等待回复本身不会重复执行完整核验。页面点击后若无法确认出现同正文的本人消息，直接转人工且不重试。
+基线后的全部新消息，不只取最后一条。彦诗筛选源不再执行商品详情页库存或价格复核；每次打开聊天
+仍须确认商品、卖家和买家账号绑定。页面点击后若无法确认出现同正文的本人消息，直接转人工且不重试。
 
 上线顺序必须是：
 
 1. 两个开关均关闭，验证迁移、API、任务和后台消息时间线；
-2. 只打开聊天开关，验证实时核验和 DeepSeek 草稿，确认页面没有发送；
+2. 只打开聊天开关，验证三方聊天绑定和 DeepSeek 草稿，确认页面没有发送；
 3. 由 Root 创建一个 `operator_canary`，人工复输商品 ID 并单独授权；
 4. 再打开自动发送开关，只验收一条正常库存询问；
 5. 验收连续回复、三轮上限、重复回调、崩溃恢复和强制停止后，再讨论已付款订单。

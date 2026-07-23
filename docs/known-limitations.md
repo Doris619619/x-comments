@@ -35,19 +35,20 @@
 - `CATALOG_SYNC_TOKEN` 仅支持一个当前有效值。轮换时由运维生成新随机值、先更新 x-comments 和
   shopping 的服务端 secret、滚动重启并验证 401/200；发生泄漏时立即替换并重启两端。令牌不得放入
   `NEXT_PUBLIC_*`、日志、数据库或 Git。
-- 采购任务 API 的创建仍只使用本地 Item 与最新发布 Catalog 快照；真正打开聊天、读取消息和发送草稿
-  前，scheduler worker 才执行单商品实时核验。聊天编排、草稿持久化、单次发送保护和事务 Outbox
-  已接入，但默认双重关闭，且只完成离线 fake/mock 验收，尚未授权真实闲鱼账号发送。
+- 采购任务 API 的创建只使用本地 Item 与最新发布 Catalog 快照。彦诗筛选源不再在打开聊天前执行
+  商品详情页实时核验；聊天编排会校对本地商品 ID、官方 URL 和 CNY 快照，并在页面上确认商品、
+  卖家与买家账号绑定。草稿持久化、单次发送保护和事务 Outbox 已接入。
 - 兼容旧 v1 采购 API 仍要求 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST`；v2 则依靠商城逐任务授权，
-  不要求动态商品长期进入服务器静态白名单。两者都不能替代实时库存、价格、账号和风控核验。标题
+  不要求动态商品长期进入服务器静态白名单。两者都不能替代聊天商品、卖家、账号和风控绑定。标题
   疑似夹带客户、联系方式、卡号或支付资料时返回 422，响应不回显命中文本。
-- 采购创建 API 只接受商品 ID，不接受调用方 URL；仍须依赖本地目录 URL 的采集正确性。只有最新发布
-  快照为 `active`、CNY 且价格一致才创建任务，但发布快照不等于实时库存确认。
+- 采购创建 API 只接受商品 ID，不接受调用方 URL；仍须依赖本地目录 URL 的采集正确性。最新发布
+  快照为 `active` 或 `suspected_missing`、CNY 且价格一致时可以创建任务；这表示信任彦诗筛选源，
+  不表示实时库存确认。
 - `PROCUREMENT_API_TOKEN` 必须独立配置且至少 32 字符；当前只支持一个有效值，不替代生产网络隔离、
   Secret 轮换与来源限制。
-- `PROCUREMENT_CHAT_ENABLED` 与 `PROCUREMENT_AUTO_SEND_ENABLED` 均默认且当前必须保持 `false`。
-  v2 任务还需要任务级可信授权；测试支付只创建 `operator_canary`，在商城 Canary 开关关闭时
-  `auto_send_authorized=false`。未来启用前必须完成受控账号人工验收、
+- `PROCUREMENT_CHAT_ENABLED` 默认关闭，但当前生产已为草稿验收开启；`PROCUREMENT_AUTO_SEND_ENABLED`
+  仍默认并保持关闭。v2 任务还需要任务级可信授权；只有单条 Root Canary 的受控发送窗口可临时开启
+  自动发送。正式启用前必须完成受控账号人工验收、
   页面身份二次核验、点击后崩溃对账、限速和紧急停用演练；仅通过离线单元测试不能授权真实发送。
 - 真实聊天页已完成一次只读 DOM 标定，确认了入口、输入框、发送按钮、左右消息方向和
   `column-reverse` 顺序；账号绑定使用 `tracknick` SHA-256。该标定没有发送消息，也不能证明未来

@@ -374,11 +374,17 @@ class ProcurementRuntimeRepository:
             conversation.lease_until = not_before
             db.commit()
 
-    def mark_source_verified(self, task_id: str, worker_id: str, now: datetime) -> None:
+    def mark_curated_source_accepted(
+        self,
+        task_id: str,
+        worker_id: str,
+        now: datetime,
+    ) -> None:
         """
-        将成功完成商品与价格核验的任务推进到打开会话。
+        将彦诗筛选且本地快照一致的任务直接推进到打开会话。
 
-        输入已租用任务、Worker 和时间；租约不匹配抛出 RuntimeError；提交状态与脱敏审计。
+        输入已租用任务、Worker 和时间；租约不匹配抛出 RuntimeError；提交兼容状态与脱敏
+        审计。不访问商品详情页，也不声称完成实时库存核验。
         """
 
         with self._session_factory() as db:
@@ -392,11 +398,11 @@ class ProcurementRuntimeRepository:
                 task,
                 conversation,
                 actor_type=ProcurementAuditActorType.SYSTEM,
-                action="source_verified",
+                action="curated_source_accepted",
                 occurred_at=now,
                 from_status=previous,
                 to_status=task.status.value,
-                idempotency_suffix="source_verified",
+                idempotency_suffix="curated_source_accepted",
             )
             db.commit()
 
