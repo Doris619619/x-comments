@@ -4,7 +4,9 @@
 它使用 Playwright 接口的最小替身，不启动浏览器、不读取登录态，也不访问真实闲鱼。
 """
 
+import asyncio
 from decimal import Decimal
+from time import monotonic
 
 import pytest
 
@@ -105,11 +107,11 @@ class _Context:
         return self.page
 
 
-def _item() -> ParsedItem:
-    """创建带搜索首图的最小解析商品；无输入、异常和外部副作用。"""
+def _item(item_id: str = "10001") -> ParsedItem:
+    """按可选商品 ID 创建带搜索首图的最小解析商品；无异常和外部副作用。"""
 
     return ParsedItem(
-        item_id="10001",
+        item_id=item_id,
         title="测试发饰",
         price=Decimal("12.50"),
         image_url="https://img.example.invalid/cover.jpg",
@@ -145,6 +147,60 @@ async def test_detail_images_normalize_deduplicate_and_preserve_cover_contract()
     ]
     assert str(result.image_url) == "https://img.example.invalid/detail-one.jpg"
     assert page.detail_locator.wait_calls == 1
+    assert page.closed is True
+
+
+@pytest.mark.asyncio
+async def test_detail_image_budget_preserves_all_catalog_items() -> None:
+    """验证详情图总预算耗尽后保留搜索封面，并完整返回剩余商品且不阻断目录发布。"""
+
+    page = _Page("正常商品详情", ["https://img.example.invalid/detail.jpg"])
+    crawler = XianyuCrawler(Settings())
+    items = [_item("10001"), _item("10002"), _item("10003")]
+
+    result, errors = await crawler._enrich_detail_images(
+        _Context(page),  # type: ignore[arg-type]
+        items,
+        deadline=monotonic() - 1,
+    )
+
+    assert [item.item_id for item in result] == ["10001", "10002", "10003"]
+    assert [str(item.image_url) for item in result] == [
+        "https://img.example.invalid/cover.jpg",
+        "https://img.example.invalid/cover.jpg",
+        "https://img.example.invalid/cover.jpg",
+    ]
+    assert errors == []
+    assert page.closed is False
+
+
+class _SlowPage(_Page):
+    """模拟详情页在预算内未完成导航，用于验证取消后不会丢失商品。"""
+
+    async def goto(self, url: str, wait_until: str, timeout: int) -> _Response:
+        """持续等待直到测试预算取消当前导航；不访问外部网络。"""
+
+        del url, wait_until, timeout
+        await asyncio.sleep(1)
+        return _Response(self.status)
+
+
+@pytest.mark.asyncio
+async def test_detail_image_timeout_falls_back_without_partial_catalog_error() -> None:
+    """验证单页耗尽剩余预算时使用搜索封面，且不把可选图库失败标记为目录失败。"""
+
+    page = _SlowPage("正常商品详情", ["https://img.example.invalid/detail.jpg"])
+    crawler = XianyuCrawler(Settings())
+    items = [_item("10001"), _item("10002")]
+
+    result, errors = await crawler._enrich_detail_images(
+        _Context(page),  # type: ignore[arg-type]
+        items,
+        deadline=monotonic() + 0.01,
+    )
+
+    assert [item.item_id for item in result] == ["10001", "10002"]
+    assert errors == []
     assert page.closed is True
 
 
