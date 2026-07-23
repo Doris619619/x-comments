@@ -14,6 +14,7 @@ OPEN_CHAT_SELECTOR = (
     "a[class*='want--'][href*='/im?'][href*='itemId='][href*='peerUserId=']"
 )
 CHAT_ENTRY_WAIT_MILLISECONDS = 8_000
+CHAT_READY_WAIT_MILLISECONDS = 8_000
 CHAT_PANEL_SELECTOR = "main[class*='chat-main--']"
 CHAT_MESSAGE_LIST_SELECTOR = "div[class*='message-list-reverse--']"
 CHAT_INPUT_SELECTOR = "textarea[placeholder='请输入消息，按Enter键发送或点击发送按钮发送']"

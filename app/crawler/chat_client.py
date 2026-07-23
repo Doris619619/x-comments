@@ -26,6 +26,7 @@ from app.crawler.chat_selectors import (
     CHAT_MESSAGE_LIST_SELECTOR,
     CHAT_MESSAGE_SELECTOR,
     CHAT_PANEL_SELECTOR,
+    CHAT_READY_WAIT_MILLISECONDS,
     CHAT_SEND_SELECTOR,
     MESSAGE_DIRECTION_ATTRIBUTES,
     MESSAGE_ID_ATTRIBUTES,
@@ -683,7 +684,22 @@ class XianyuChatClient:
         无输入；返回输入框与发送按钮；DOM 缺失或歧义时抛出 ``ChatSafetyError``；只读 DOM。
         """
 
+        # 闲鱼聊天页在 DOMContentLoaded 后仍会异步挂载 React 控件；先做有界等待，
+        # 再执行唯一性检查，避免把“尚未渲染”误判成结构歧义，同时保留失败关闭边界。
+        for selector in (
+            CHAT_PANEL_SELECTOR,
+            CHAT_MESSAGE_LIST_SELECTOR,
+            CHAT_INPUT_SELECTOR,
+            CHAT_SEND_SELECTOR,
+        ):
+            await self._page.wait_for_selector(
+                selector,
+                state="visible",
+                timeout=CHAT_READY_WAIT_MILLISECONDS,
+            )
+
         await _unique_visible_locator(self._page, CHAT_PANEL_SELECTOR, "聊天面板")
+        await _unique_visible_locator(self._page, CHAT_MESSAGE_LIST_SELECTOR, "消息列表")
         chat_input = await _unique_visible_locator(self._page, CHAT_INPUT_SELECTOR, "聊天输入框")
         send_button = await _unique_visible_locator(self._page, CHAT_SEND_SELECTOR, "聊天发送按钮")
         return chat_input, send_button

@@ -31,6 +31,7 @@ from app.crawler.chat_selectors import (
     CHAT_MESSAGE_LIST_SELECTOR,
     CHAT_MESSAGE_SELECTOR,
     CHAT_PANEL_SELECTOR,
+    CHAT_READY_WAIT_MILLISECONDS,
     CHAT_SEND_SELECTOR,
     OPEN_CHAT_SELECTOR,
     OWN_CHAT_MESSAGE_SELECTOR,
@@ -685,6 +686,12 @@ async def test_open_conversation_clicks_only_the_unique_chat_entry() -> None:
     assert environment.open_node.click_count == 1
     assert environment.send_node.click_count == 0
     assert guard.entries == 1
+    assert environment.page.wait_for_selector_calls == [
+        (CHAT_PANEL_SELECTOR, "visible", CHAT_READY_WAIT_MILLISECONDS),
+        (CHAT_MESSAGE_LIST_SELECTOR, "visible", CHAT_READY_WAIT_MILLISECONDS),
+        (CHAT_INPUT_SELECTOR, "visible", CHAT_READY_WAIT_MILLISECONDS),
+        (CHAT_SEND_SELECTOR, "visible", CHAT_READY_WAIT_MILLISECONDS),
+    ]
 
 
 @pytest.mark.asyncio
