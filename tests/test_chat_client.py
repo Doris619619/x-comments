@@ -5,6 +5,7 @@
 启动 Playwright 浏览器、不访问网络、不读取本地登录态，也不触发真实闲鱼聊天或交易。
 """
 
+import hashlib
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -19,20 +20,21 @@ from app.crawler.chat_client import (
     PolicyAllowedDraft,
     XianyuChatClient,
     build_message_fingerprint,
+    chat_url_matches_binding,
+    discover_chat_binding,
     item_url_matches_binding,
 )
 from app.crawler.chat_selectors import (
-    ACCOUNT_IDENTITY_SELECTOR,
     BODY_SELECTOR,
     CHAT_INPUT_SELECTOR,
+    CHAT_MESSAGE_LIST_SELECTOR,
     CHAT_MESSAGE_SELECTOR,
     CHAT_PANEL_SELECTOR,
     CHAT_SEND_SELECTOR,
     OPEN_CHAT_SELECTOR,
     OWN_CHAT_MESSAGE_SELECTOR,
-    PRODUCT_IDENTITY_SELECTOR,
-    SELLER_IDENTITY_SELECTOR,
 )
+from app.services.xianyu_account_guard import AccountAccessGuard
 
 
 @dataclass
@@ -134,6 +136,16 @@ class FakeLocator:
 
         return self._single().attributes.get(name)
 
+    async def evaluate(self, expression: str) -> str:
+        """
+        返回离线节点声明的 flex 排列方向。
+
+        参数为生产代码的计算样式表达式；返回测试属性；不执行 JavaScript。
+        """
+
+        del expression
+        return self._single().attributes.get("data-flex-direction", "column")
+
     async def fill(self, value: str, *, timeout: float | None = None) -> None:
         """
         记录对唯一节点执行的输入文本。
@@ -158,6 +170,26 @@ class FakeLocator:
             node.on_click()
 
 
+class FakeContext:
+    """
+    提供聊天客户端所需的最小浏览器上下文。
+
+    它保存页面列表和账号 Cookie，只服务离线测试，不持有真实登录态。
+    """
+
+    def __init__(self, account_id: str) -> None:
+        """保存离线账号 ID，并初始化空页面列表。"""
+
+        self.account_id = account_id
+        self.pages: list[FakePage] = []
+
+    async def cookies(self, *urls: str) -> list[dict[str, str]]:
+        """返回一个离线 ``tracknick`` Cookie；URL 参数仅用于兼容生产接口。"""
+
+        del urls
+        return [{"name": "tracknick", "value": self.account_id}]
+
+
 class FakePage:
     """
     按集中 selector 返回共享 FakeLocator 的离线 Page 实现。
@@ -165,7 +197,13 @@ class FakePage:
     该对象没有 ``goto`` 或网络能力，因此测试无法意外访问真实闲鱼。
     """
 
-    def __init__(self, url: str, nodes_by_selector: dict[str, list[FakeNode]]) -> None:
+    def __init__(
+        self,
+        url: str,
+        nodes_by_selector: dict[str, list[FakeNode]],
+        *,
+        account_id: str = "account-300",
+    ) -> None:
         """
         保存固定 URL 与 selector 映射。
 
@@ -174,6 +212,8 @@ class FakePage:
 
         self.url = url
         self.nodes_by_selector = nodes_by_selector
+        self.context = FakeContext(account_id)
+        self.context.pages.append(self)
 
     def locator(self, selector: str) -> FakeLocator:
         """
@@ -192,6 +232,16 @@ class FakePage:
         """
 
         del timeout
+
+    async def wait_for_load_state(
+        self,
+        state: str,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """消费离线页面加载等待参数，不阻塞且不访问网络。"""
+
+        del state, timeout
 
 
 class FakeAccountGuard:
@@ -258,7 +308,7 @@ def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
             text="还在，可以正常使用",
             attributes={
                 "data-message-id": "msg-1",
-                "data-direction": "seller",
+                "class": "msg-text-left--fixture",
                 "data-timestamp": "2026-07-20T00:00:00Z",
             },
         )
@@ -266,11 +316,11 @@ def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
     own_messages: list[FakeNode] = []
     nodes_by_selector = {
         BODY_SELECTOR: [FakeNode(text="闲鱼商品聊天")],
-        PRODUCT_IDENTITY_SELECTOR: [FakeNode(attributes={"data-item-id": "item-100"})],
-        SELLER_IDENTITY_SELECTOR: [FakeNode(attributes={"data-seller-id": "seller-200"})],
-        ACCOUNT_IDENTITY_SELECTOR: [FakeNode(attributes={"data-account-id": "account-300"})],
         OPEN_CHAT_SELECTOR: [open_node],
         CHAT_PANEL_SELECTOR: [FakeNode()],
+        CHAT_MESSAGE_LIST_SELECTOR: [
+            FakeNode(attributes={"data-flex-direction": "column-reverse"})
+        ],
         CHAT_INPUT_SELECTOR: [input_node],
         CHAT_SEND_SELECTOR: [send_node],
         CHAT_MESSAGE_SELECTOR: messages,
@@ -290,15 +340,26 @@ def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
             text=input_node.filled_text,
             attributes={
                 "data-message-id": f"msg-{len(messages) + 1}",
-                "data-direction": "self",
+                "class": "msg-text-right--fixture",
                 "data-timestamp": "2026-07-20T00:00:01Z",
             },
         )
-        messages.append(sent)
-        own_messages.append(sent)
+        messages.insert(0, sent)
+        own_messages.insert(0, sent)
 
     send_node.on_click = append_sent_message
     page = FakePage("https://www.goofish.com/item?id=item-100", nodes_by_selector)
+    open_node.text = "聊一聊"
+    open_node.attributes["href"] = (
+        "https://www.goofish.com/im?itemId=item-100&peerUserId=seller-200"
+    )
+
+    def open_chat() -> None:
+        """把离线商品页切换到严格绑定的聊天 URL。"""
+
+        page.url = open_node.attributes["href"]
+
+    open_node.on_click = open_chat
     return FakeChatEnvironment(page, input_node, send_node, open_node, messages, own_messages)
 
 
@@ -330,6 +391,42 @@ def test_item_url_binding_requires_exact_https_item_identity() -> None:
         "https://www.goofish.com/item?id=item-100&id=item-101", "item-100"
     )
     assert not item_url_matches_binding("https://example.com/item?id=item-100", "item-100")
+
+
+def test_chat_url_binding_requires_exact_item_and_seller() -> None:
+    """
+    验证聊天 URL 必须同时绑定唯一商品与卖家参数。
+
+    无输入；断言失败抛出 ``AssertionError``；只执行纯 URL 解析。
+    """
+
+    valid = "https://www.goofish.com/im?itemId=item-100&peerUserId=seller-200"
+    assert chat_url_matches_binding(valid, "item-100", "seller-200")
+    assert not chat_url_matches_binding(valid, "item-other", "seller-200")
+    assert not chat_url_matches_binding(valid, "item-100", "seller-other")
+
+
+@pytest.mark.asyncio
+async def test_discovers_seller_and_accepts_hashed_account_binding() -> None:
+    """
+    验证首次进入商品页时从聊天 URL 锁定卖家，并以账号 Cookie 指纹完成绑定。
+
+    无输入；只读取离线 DOM 和 Cookie，不触发点击、网络或真实聊天。
+    """
+
+    environment = make_chat_environment()
+    expected_fingerprint = hashlib.sha256(b"account-300").hexdigest()
+    binding = await discover_chat_binding(
+        cast(Page, environment.page),
+        source_item_id="item-100",
+        expected_account_id=expected_fingerprint,
+        account_guard=cast(AccountAccessGuard, FakeAccountGuard()),
+    )
+
+    assert binding.source_item_id == "item-100"
+    assert binding.seller_id == "seller-200"
+    assert binding.account_id == expected_fingerprint
+    assert environment.open_node.click_count == 0
 
 
 def test_message_fingerprint_is_stable_after_text_normalization() -> None:
@@ -420,11 +517,12 @@ async def test_send_fails_closed_when_latest_message_changed() -> None:
     guard = FakeAccountGuard()
     client = make_client(environment, guard)
     latest = await client.read_latest_message()
-    environment.messages.append(
+    environment.messages.insert(
+        0,
         FakeNode(
             text="刚刚有人问了",
-            attributes={"data-message-id": "msg-2", "data-direction": "seller"},
-        )
+            attributes={"data-message-id": "msg-2", "class": "msg-text-left--fixture"},
+        ),
     )
 
     with pytest.raises(ChatSafetyError) as caught:
@@ -440,25 +538,23 @@ async def test_send_fails_closed_when_latest_message_changed() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("selector", "attribute", "wrong_value"),
-    [
-        (PRODUCT_IDENTITY_SELECTOR, "data-item-id", "item-other"),
-        (SELLER_IDENTITY_SELECTOR, "data-seller-id", "seller-other"),
-        (ACCOUNT_IDENTITY_SELECTOR, "data-account-id", "account-other"),
-    ],
-)
-async def test_identity_mismatch_blocks_before_chat_write(
-    selector: str, attribute: str, wrong_value: str
-) -> None:
+@pytest.mark.parametrize("mismatch", ["item", "seller", "account"])
+async def test_identity_mismatch_blocks_before_chat_write(mismatch: str) -> None:
     """
     验证商品、卖家或当前账号任一不一致都会在聊天写入前失败关闭。
 
-    参数由离线身份变体提供；断言失败抛出 ``AssertionError``；不访问网络。
+    参数指定要破坏的身份边界；断言失败抛出 ``AssertionError``；不访问网络。
     """
 
     environment = make_chat_environment()
-    environment.page.nodes_by_selector[selector][0].attributes[attribute] = wrong_value
+    if mismatch == "item":
+        environment.page.url = "https://www.goofish.com/item?id=item-other"
+    elif mismatch == "seller":
+        environment.open_node.attributes["href"] = (
+            "https://www.goofish.com/im?itemId=item-100&peerUserId=seller-other"
+        )
+    else:
+        environment.page.context.account_id = "account-other"
     guard = FakeAccountGuard()
     client = make_client(environment, guard)
 
@@ -556,3 +652,32 @@ async def test_open_conversation_clicks_only_the_unique_chat_entry() -> None:
     assert environment.open_node.click_count == 1
     assert environment.send_node.click_count == 0
     assert guard.entries == 1
+
+
+@pytest.mark.asyncio
+async def test_reads_all_visible_messages_after_baseline_in_order() -> None:
+    """
+    验证卖家连续发送两条消息时会完整按顺序返回，而不是只读取最后一条。
+
+    无输入；副作用仅修改离线消息数组，不访问真实聊天页面。
+    """
+
+    environment = make_chat_environment()
+    client = make_client(environment, FakeAccountGuard())
+    baseline = await client.read_latest_message()
+    # column-reverse 页面以“最新在前”的 DOM 顺序保存节点。
+    environment.messages[0:0] = [
+        FakeNode(
+            text="明天可以发货",
+            attributes={"data-message-id": "msg-3", "class": "msg-text-left--fixture"},
+        ),
+        FakeNode(
+            text="还在",
+            attributes={"data-message-id": "msg-2", "class": "msg-text-left--fixture"},
+        ),
+    ]
+
+    messages = await client.read_messages_after(baseline.fingerprint)
+
+    assert [message.text for message in messages] == ["还在", "明天可以发货"]
+    assert all(message.direction == "seller" for message in messages)

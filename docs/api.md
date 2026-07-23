@@ -406,7 +406,9 @@ Authorization: Bearer <PROCUREMENT_API_TOKEN>
 ```
 
 令牌未配置或短于 32 字符返回 **503**，缺失或错误返回 **401**。它不能与
-`XIANYU_API_TOKEN`/`CATALOG_SYNC_TOKEN` 共用，不得进入浏览器、数据库、日志或 Git。
+`XIANYU_API_TOKEN`/`CATALOG_SYNC_TOKEN` 共用，不得进入浏览器、数据库、日志或 Git。旧版 v1
+任务还受 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 保护；v2 任务改由商城的 Root/支付授权快照、
+服务端令牌和本地来源快照共同约束。
 
 ### `POST /api/v1/procurement-tasks`
 
@@ -415,8 +417,10 @@ SHA-256：同键同 body 返回原任务和原 `session_id`，同键不同 body 
 
 ```json
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "execution_mode": "operator_canary",
+  "auto_send_authorized": false,
   "source": {
     "platform": "xianyu",
     "item_id": "1234567890",
@@ -436,19 +440,27 @@ SHA-256：同键同 body 返回原任务和原 `session_id`，同键不同 body 
 }
 ```
 
-请求不接受 `item_url`；服务端只从现有 `Item.item_url` 读取来源 URL。未知字段直接返回 **422**，因此
-日本客户姓名、电话、地址、支付资料等额外字段不能进入任务。创建前依次验证：
+v1 兼容请求只允许未授权的 `paid_order` 默认值；商城 POC 使用 v2 `operator_canary`。默认
+`auto_send_authorized=false`，不允许页面发送。未来单商品 Canary 要授权发送时必须同时提供
+`authorized_at` 和 `authorization_source="operator_canary"`，且仍受全局双开关和全部确定性策略约束。
 
-1. Item 表存在该商品；
-2. 存在最新发布 Catalog 快照；
-3. `availability=active` 且 `currency=CNY`；
-4. 发布价格与 `price_cny_minor` 完全一致。
+请求不接受 `item_url`；服务端只从现有 `Item.item_url` 读取来源 URL。未知字段直接返回 **422**，因此
+日本客户姓名、电话、地址、支付资料等额外字段不能进入任务。标题自由文本还会经过隐私/支付资料
+扫描，错误响应只返回稳定 code，不回显正文。创建前依次验证：
+
+1. v1 任务的 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 已配置且包含该商品；v2 跳过这项静态白名单；
+2. 标题未命中客户、联系方式、卡号或支付资料安全规则；
+3. Item 表存在该商品；
+4. 存在最新发布 Catalog 快照；
+5. `availability=active` 且 `currency=CNY`；
+6. 发布价格与 `price_cny_minor` 完全一致；
+7. 同一 `item_id` 没有其他活动采购任务。
 
 成功在同一事务中创建本地执行任务和会话，返回 **202**：
 
 ```json
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "session_id": "82dc9175-4ef1-43d6-b318-0b49e205ba2d",
   "status": "pending_source_verification",
@@ -460,15 +472,23 @@ SHA-256：同键同 body 返回原任务和原 `session_id`，同键不同 body 
 | 状态码 | code/说明 |
 |--------|-----------|
 | 401 | 采购 Bearer 令牌缺失或错误 |
+| 403 | v1 的 `source_item_not_allowlisted` |
 | 404 | `source_item_not_found` |
-| 409 | `idempotency_conflict`、`task_id_conflict`、`source_not_active` 或 `source_price_changed` |
-| 422 | body、UUID、幂等键或额外字段不符合契约 |
-| 503 | 采购令牌未配置 |
+| 409 | `idempotency_conflict`、`task_id_conflict`、`source_item_has_active_procurement`、`source_not_active` 或 `source_price_changed` |
+| 422 | body、UUID、幂等键、额外字段或自由文本安全规则不符合契约 |
+| 503 | 采购令牌或 v1 商品白名单未配置 |
 
 ### `GET /api/v1/procurement-tasks/{task_id}`
 
 返回任务保存的来源商品 ID、标题/CNY 整数分、目标、轮次/期限、任务与会话状态、下一动作、脱敏摘要/
-原因和时间。响应不返回请求幂等键、body 哈希、内部租约或商品 URL。不存在返回 **404**。
+原因和时间，以及 v2 执行模式和任务级授权快照。响应不返回请求幂等键、body 哈希、内部租约或商品
+URL。不存在返回 **404**。
+
+### `GET /api/v1/procurement-tasks/{task_id}/messages?after_seq={integer}&limit={1..200}`
+
+按会话序号增量返回卖家原文和 AI 草稿，供商城受保护的管理后台形成统一时间线。响应携带
+`next_seq` 和 `has_more`；正文不得进入公开用户 API 或普通日志。接口只读，不触发 AI、页面发送、
+购买或付款。
 
 ### `POST /api/v1/procurement-tasks/{task_id}/cancel`
 

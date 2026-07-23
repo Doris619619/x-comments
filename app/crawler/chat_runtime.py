@@ -42,6 +42,12 @@ class ProcurementChatClient(Protocol):
     async def read_latest_message(self) -> ChatMessageSnapshot:
         """读取绑定会话最新消息；无页面写入副作用。"""
 
+    async def read_messages_after(
+        self,
+        baseline_fingerprint: str,
+    ) -> list[ChatMessageSnapshot]:
+        """读取基线之后全部可见消息；找不到基线时失败关闭。"""
+
     async def send_policy_allowed_draft(
         self,
         draft: PolicyAllowedDraft,
@@ -144,7 +150,8 @@ class PlaywrightXianyuChatFactory:
                         if response.status in {403, 429} and blocked_status is None:
                             blocked_status = response.status
 
-                    page.on("response", observe_status)
+                    # 使用上下文级监听覆盖商品页和点击后新打开的聊天页。
+                    context.on("response", observe_status)
                     async with self._account_guard.hold():
                         navigation = await page.goto(
                             item_url,

@@ -2,8 +2,10 @@
 
 ## 当前实现范围
 
-当前代码保持 POC 的有限 Playwright 采集，并增加 Goal Merge 2 所需的 PostgreSQL Catalog
-发布与商城同步边界。真实云端验证仍需由持有登录态和数据库权限的部署者执行，不能声明采集成功。
+当前代码保持 POC 的有限 Playwright 采集与 PostgreSQL Catalog 发布边界，并接入商城测试预授权
+触发的采购对话任务。v2 采购入口只接受商城服务端令牌，并在本地目录、价格和活动任务唯一性上
+失败关闭；自动发送仍需要全局开关与单任务授权同时成立。真实云端验证仍需由持有登录态和数据库
+权限的部署者执行，不能仅凭离线测试声明真实聊天成功。
 
 ## 模块边界
 
@@ -63,6 +65,8 @@ HTTP 请求
 - `app/ai/`：供应商无关草稿契约、`procurement_v1` 提示词和同步 DeepSeek 适配器；卖家消息与
   商品标题按不可信外部数据隔离，模块只返回草稿，不访问数据库或 Playwright。
 - `app/services/procurement_policy.py`：无副作用的确定性草稿检查；不调用 Playwright，也不发送消息。
+- `app/services/procurement_payload_safety.py`：在任务入库和 AI 调用前扫描商品标题中疑似夹带的客户、
+  联系方式、卡号或支付资料；只返回稳定错误码，不回显命中文本。
 - `app/services/procurement_orchestrator.py`：把订单绑定任务、来源实时核验、聊天适配器、DeepSeek 草稿、
   确定性策略和单次发送事务串联起来；最多三轮，不包含购买、付款或地址动作。
 - `app/services/procurement_outbox.py`：向固定商城回调地址投递有序事件；重试只重试回调，不会触发聊天重发。
@@ -84,17 +88,22 @@ HTTP 请求
 `off_shelf`；部分成功、风控和失败只保留本轮确实看到的商品，不进行缺失判断。首批清单控制在
 3 至 5 个词内，单轮上限保持 50 条；N 个持续到期词时，单个词约每 `N × 10` 分钟轮询一次。
 
-采购本地 API 先以请求幂等键和规范化 body SHA-256 查询原任务；同键同正文返回原任务，同键不同
-正文返回 409。首次创建必须能在 `items` 找到商品，且最新发布 Catalog 快照为 `active`、币种为 CNY、
-价格与商城整数分快照完全一致。通过后在同一短事务中创建 `ProcurementExecutionTask` 与
-`ConversationSession`。商品 URL 不接受调用方输入，只从 `Item.item_url` 复制到内部会话。
+采购本地 API 对兼容 v1 请求继续校验 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST`，避免升级后扩大旧调用方
+权限；v2 由商城 Root/可信支付事件写入逐任务授权，不要求每次修改服务器静态白名单。随后扫描标题中
+的疑似客户或支付资料，再以请求幂等键和规范化 body SHA-256 查询原任务；同键同正文返回原任务，
+同键不同正文返回 409。首次创建必须能在 `items` 找到商品，且最新发布 Catalog 快照为 `active`、
+币种为 CNY、价格与商城整数分快照完全一致。通过后在同一短事务中创建
+`ProcurementExecutionTask` 与 `ConversationSession`。商品 URL 不接受调用方输入，只从
+`Item.item_url` 复制到内部会话；数据库部分唯一索引同时阻止同一商品存在两个活动采购任务。
 
 入站消息通过外部消息 ID、出站草稿通过 SHA-256 幂等键去重；状态变化与商城回调事件在同一数据库
 事务中写入审计和 `ProcurementOutbox`。投递器按每个任务的 `event_seq` 串行回调，任何同任务未交付
 事件都会阻止下一次外部聊天动作。商城须按 `event_id` 幂等接收；回调失败会独立退避重试，但绝不
 重复执行 Playwright 发送。发送前先持久化 `sending`，并在任务/会话行锁内完成唯一一次点击；崩溃或
 结果不确定时进入人工审核，恢复后不重发。首次打开会话保存既有末条消息指纹作为基线，避免把历史
-消息误认为本次回复。编排器和投递器只在唯一 `scheduler_worker` 角色运行。
+消息误认为本次回复；读取时保存基线后的全部新消息，并把页面的 `column-reverse` DOM 顺序还原为
+时间正序。回复轮询按 2、5、10 分钟及后续每 15 分钟退避，最长 24 小时。编排器和投递器只在唯一
+`scheduler_worker` 角色运行。
 
 商品解析优先使用页面正常访问触发的搜索响应 JSON。解析器验证响应 `itemId` 与商品 URL `item?id=` 一致，任何不一致记录都不会入库。
 
@@ -117,23 +126,27 @@ PostgreSQL 容器并使用 `postgres_data` volume。配置示例见 `.env.exampl
 但只能部署一个 scheduler-worker；该 worker 同时持有唯一 Playwright 队列和定时调度职责。
 
 采购编排和脚本发送分别由 `PROCUREMENT_CHAT_ENABLED`、`PROCUREMENT_AUTO_SEND_ENABLED` 控制，
-两者默认均为 `false`；自动发送不能脱离聊天编排单独开启。置信度阈值默认 0.85，
-每会话自动发送上限硬限制为三轮。即使未来显式打开配置，模型输出仍须通过意图白名单、风险文本、
-最新消息、商品/卖家/账号、价格、DOM、冷却时间和唯一写锁等全部确定性检查。
+两者默认均为 `false`；自动发送不能脱离聊天编排单独开启。即使两个进程开关均打开，v2 任务仍须
+携带可信的任务级 `auto_send_authorized=true`、`authorized_at` 与匹配执行模式的
+`authorization_source` 才可能发送。置信度阈值默认 0.85，每会话自动发送上限硬限制为三轮；模型
+输出还须通过意图白名单、风险文本、最新消息、商品/卖家/账号、价格、DOM、冷却时间和唯一写锁等
+全部确定性检查。
 
 DeepSeek 草稿适配器不读取环境变量；worker 必须显式构造 `DeepSeekConfig` 并提供 API Key，默认使用
 `https://api.deepseek.com/chat/completions`、非流式 JSON Output 和关闭 thinking 的
 `deepseek-v4-flash`。密钥使用 `SecretStr`，模块不记录密钥、提示词、卖家原文或供应商错误正文。
 
 采购任务 API 使用与核验、Catalog Sync 分离的 `PROCUREMENT_API_TOKEN`，少于 32 字符按未配置处理并
-返回 503。回调另用 `SHOPPING_PROCUREMENT_TOKEN`，并和 DeepSeek 密钥一样只注入 scheduler-worker，
+返回 503。兼容旧调用方时，API 容器还可配置逗号分隔的
+`PROCUREMENT_SOURCE_ITEM_ALLOWLIST`；该值只控制 v1，不会授权 v2 发送。回调另用
+`SHOPPING_PROCUREMENT_TOKEN`，并和 DeepSeek 密钥一样只注入 scheduler-worker，
 不注入 API 容器；这些令牌不进入请求体、响应、浏览器、数据库或普通日志。
 
 ## 安全边界
 
 当前采购任务 API 只读本地目录并写本地任务，不访问闲鱼页面。跨服务采购契约禁止日本客户姓名、
-手机号、精确地址和支付资料进入 x-comments。验证码、登录失效、403/429、
-访问频繁和结构异常必须停止，禁止绕过、代理轮换或多账号续爬。
+手机号、精确地址和支付资料进入 x-comments；严格 Schema 拒绝额外字段，自由文本再经过安全扫描。
+验证码、登录失效、403/429、访问频繁和结构异常必须停止，禁止绕过、代理轮换或多账号续爬。
 
 正式应用为 API 核验器与 scheduler worker 注入同一种 `XianyuAccountGuard`。它先用
 进程内 `asyncio.Lock` 阻止本进程并发，再用 PostgreSQL session-level advisory lock

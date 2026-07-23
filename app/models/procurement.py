@@ -147,7 +147,30 @@ class ProcurementExecutionTaskStatus(StrEnum):
     VERIFICATION_TIMEOUT = "verification_timeout"
     PROCUREMENT_FAILED = "procurement_failed"
     BLOCKED_BY_AUTH_OR_RISK_CONTROL = "blocked_by_auth_or_risk_control"
+    CANARY_COMPLETED = "canary_completed"
     CANCELLED = "cancelled"
+
+
+class ProcurementExecutionMode(StrEnum):
+    """
+    定义采购任务属于真实已付款订单还是 Root 白名单测试。
+
+    模式只控制执行边界和后台展示，不代表购买、付款或收货授权。
+    """
+
+    PAID_ORDER = "paid_order"
+    OPERATOR_CANARY = "operator_canary"
+
+
+class ProcurementAuthorizationSource(StrEnum):
+    """
+    定义单任务自动发送授权的可信来源。
+
+    已付款任务只能来自已验证支付事件，Canary 只能来自 Root 人工授权。
+    """
+
+    VERIFIED_PAYMENT_EVENT = "verified_payment_event"
+    OPERATOR_CANARY = "operator_canary"
 
 
 class ProcurementNextAction(StrEnum):
@@ -185,6 +208,25 @@ class ProcurementExecutionTask(Base):
     )
 
     task_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    contract_version: Mapped[int] = mapped_column(Integer, default=1)
+    execution_mode: Mapped[ProcurementExecutionMode] = mapped_column(
+        Enum(
+            ProcurementExecutionMode,
+            native_enum=False,
+            values_callable=lambda members: [member.value for member in members],
+        ),
+        default=ProcurementExecutionMode.PAID_ORDER,
+        index=True,
+    )
+    auto_send_authorized: Mapped[bool] = mapped_column(Boolean, default=False)
+    authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authorization_source: Mapped[ProcurementAuthorizationSource | None] = mapped_column(
+        Enum(
+            ProcurementAuthorizationSource,
+            native_enum=False,
+            values_callable=lambda members: [member.value for member in members],
+        )
+    )
     source_item_id: Mapped[str] = mapped_column(ForeignKey("items.item_id"), index=True)
     expected_title: Mapped[str] = mapped_column(Text)
     expected_price_cny_minor: Mapped[int] = mapped_column(Integer)
@@ -256,6 +298,7 @@ class ConversationSession(Base):
     round_count: Mapped[int] = mapped_column(Integer, default=0)
     event_seq: Mapped[int] = mapped_column(Integer, default=0)
     version: Mapped[int] = mapped_column(Integer, default=1)
+    seller_poll_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     latest_inbound_message_id: Mapped[str | None] = mapped_column(String(36))
     latest_outbound_message_id: Mapped[str | None] = mapped_column(String(36))
     lease_owner: Mapped[str | None] = mapped_column(String(64))

@@ -46,6 +46,10 @@ PURCHASE_COMMITMENT_PATTERN = re.compile(
     re.I,
 )
 NEGOTIATION_PATTERN = re.compile(r"(?:最低价|便宜点|优惠点|砍价|降价|包邮吗|改价)", re.I)
+CREDENTIAL_PATTERN = re.compile(
+    r"(?:验证码|短信码|登录码|安全验证|人机验证|captcha|verification\s*code)",
+    re.I,
+)
 
 
 class AutoSendReason(StrEnum):
@@ -56,6 +60,7 @@ class AutoSendReason(StrEnum):
     """
 
     AUTO_SEND_DISABLED = "auto_send_disabled"
+    TASK_AUTO_SEND_NOT_AUTHORIZED = "task_auto_send_not_authorized"
     INVALID_POLICY_LIMIT = "invalid_policy_limit"
     SESSION_NOT_ACTIVE = "session_not_active"
     ROUND_LIMIT_REACHED = "round_limit_reached"
@@ -92,6 +97,7 @@ class AutoSendContext:
     """
 
     enabled: bool = False
+    task_auto_send_authorized: bool = False
     session_status: ConversationSessionStatus = ConversationSessionStatus.PENDING_OPEN
     round_count: int = 0
     max_auto_rounds: int = MAX_HARD_AUTO_ROUNDS
@@ -142,6 +148,7 @@ def scan_draft_risks(content: str) -> tuple[ProcurementRiskFlag, ...]:
         (ADDRESS_PATTERN, ProcurementRiskFlag.ADDRESS_REQUEST),
         (PURCHASE_COMMITMENT_PATTERN, ProcurementRiskFlag.PURCHASE_COMMITMENT),
         (NEGOTIATION_PATTERN, ProcurementRiskFlag.PRICE_NEGOTIATION),
+        (CREDENTIAL_PATTERN, ProcurementRiskFlag.CREDENTIAL_OR_CAPTCHA),
     )
     return tuple(flag for pattern, flag in checks if pattern.search(content))
 
@@ -162,6 +169,8 @@ def evaluate_auto_send(
 
     if not safe_context.enabled:
         reasons.append(AutoSendReason.AUTO_SEND_DISABLED)
+    if not safe_context.task_auto_send_authorized:
+        reasons.append(AutoSendReason.TASK_AUTO_SEND_NOT_AUTHORIZED)
     if not 1 <= safe_context.max_auto_rounds <= MAX_HARD_AUTO_ROUNDS:
         reasons.append(AutoSendReason.INVALID_POLICY_LIMIT)
     if safe_context.session_status is not ConversationSessionStatus.ACTIVE:

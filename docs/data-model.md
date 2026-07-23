@@ -290,18 +290,21 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 
 ### 4.7 采购聊天领域表
 
-迁移 `20260720_0006` 增加以下五表。任务 API 已使用前两表；当前 DeepSeek 适配器只在内存返回
-已验证草稿，尚未把草稿写入 `conversation_messages`，真实闲鱼聊天也未接入。
+迁移 `20260720_0006` 增加以下五表，`20260723_0008` 再补充 v2 任务授权快照、Canary 模式、
+卖家轮询次数和单商品活动任务唯一索引。真实发送默认关闭，离线编排会把已验证草稿与策略结果写入
+消息、审计和 Outbox。
 
 | 表名 | 核心字段 | 约束与用途 |
 |------|----------|------------|
-| `procurement_execution_tasks` | `task_id`、`source_item_id`、标题/CNY 整数分快照、目标、轮次/期限、请求幂等键/body 哈希、状态/下一动作、租约、摘要/原因与时间 | `task_id` 主键、请求幂等键唯一；价格非负、轮次 1–3；只表达本地核验与聊天执行，不含购买或付款授权 |
-| `conversation_sessions` | `session_id`、`task_id`、`source_item_id`、卖家快照、账号别名、`status`、`round_count`、`event_seq`、租约与时间 | `task_id` 唯一；只保存商城任务 UUID，不保存客户资料、Cookie 或密码 |
+| `procurement_execution_tasks` | `task_id`、`contract_version`、`execution_mode`、任务级自动发送授权快照、`source_item_id`、标题/CNY 整数分快照、目标、轮次/期限、请求幂等键/body 哈希、状态/下一动作、租约、摘要/原因与时间 | `task_id` 主键、请求幂等键唯一；价格非负、轮次 1–3；同一商品只能有一个活动任务；授权只允许聊天发送，不代表购买或付款 |
+| `conversation_sessions` | `session_id`、`task_id`、`source_item_id`、卖家快照、账号别名、`status`、`round_count`、`seller_poll_attempt_count`、`event_seq`、租约与时间 | `task_id` 唯一；只保存商城任务 UUID，不保存客户资料、Cookie 或密码 |
 | `conversation_messages` | 会话内 `seq`、方向、角色、正文、正文哈希、回复关系、LLM/策略字段、发送时间 | `(session_id, seq)`、`(session_id, external_message_id)` 和 `idempotency_key` 唯一；一条出站消息从草稿演进至发送结果，不重复建行 |
 | `procurement_audit_logs` | 任务/会话/消息关联、actor、动作、前后状态、原因、脱敏元数据、关联与幂等键 | 只追加；同任务、幂等键和动作不得重复；普通日志不得记录消息正文 |
 | `procurement_outbox` | `event_id`、任务内 `event_seq`、事件类型、JSON payload、投递状态、租约、重试时间 | `event_id`、幂等键及 `(task_id, event_seq)` 唯一；供后续回调商城的事务 Outbox 使用 |
 
-会话状态为 `pending_open`、`active`、`waiting_seller`、`completed`、
+执行模式为 `paid_order` 或 `operator_canary`。任务级自动发送授权必须同时保存
+`auto_send_authorized=true`、`authorized_at` 和与模式匹配的 `authorization_source`；POC 测试支付
+使用 `operator_canary`，默认不授权自动发送。会话状态为 `pending_open`、`active`、`waiting_seller`、`completed`、
 `human_review_required`、`blocked`、`failed` 或 `cancelled`。消息状态区分入站观察/分析、出站草稿/
 策略/排队/发送以及 `policy_blocked`、`send_failed`、`superseded`，`sent` 只能表示页面结果已确认。
 
@@ -353,6 +356,7 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 | `20260716_0005` | `alembic/versions/20260716_0005_unique_inflight_keyword.py` | 创建 PostgreSQL 同关键词 pending/running 部分唯一索引 |
 | `20260720_0006` | `alembic/versions/20260720_0006_procurement_chat_core.py` | 创建本地采购执行任务、聊天会话、消息、审计和事务 Outbox 表 |
 | `20260722_0007` | `alembic/versions/20260722_0007_catalog_image_urls.py` | 为商品与 Catalog Sync 快照增加最多九张的详情图库，并由旧首图回填 |
+| `20260723_0008` | `alembic/versions/20260723_0008_procurement_authorization_v2.py` | 增加 v2 授权快照、Canary 模式、卖家轮询次数及单商品活动任务唯一索引 |
 
 ```bash
 alembic upgrade head    # 应用迁移

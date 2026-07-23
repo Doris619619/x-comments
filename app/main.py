@@ -29,12 +29,13 @@ def create_app(
     verification_token: str | None = None,
     catalog_sync_token: str | None = None,
     procurement_api_token: str | None = None,
+    procurement_source_item_allowlist: frozenset[str] | None = None,
 ) -> FastAPI:
     """
     创建 FastAPI 应用并注册版本化路由。
 
-    输入可选的 worker 覆盖开关、核验器和服务端令牌，返回应用；未覆盖时仅
-    scheduler_worker 角色启动 worker，装配阶段不访问外部网络。
+    输入可选的 worker 覆盖开关、核验器、服务端令牌和采购商品白名单，返回应用；
+    未覆盖时仅 scheduler_worker 角色启动 worker，装配阶段不访问外部网络。
     """
 
     settings = get_settings()
@@ -133,6 +134,11 @@ def create_app(
     if len(configured_procurement_token) < 32:
         configured_procurement_token = ""
     application.state.procurement_api_token = configured_procurement_token or None
+    application.state.procurement_source_item_allowlist = (
+        procurement_source_item_allowlist
+        if procurement_source_item_allowlist is not None
+        else settings.procurement_source_item_ids
+    )
     return application
 
 

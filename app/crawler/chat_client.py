@@ -14,15 +14,15 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
-from playwright.async_api import Locator, Page
+from playwright.async_api import Locator, Page, Response
 
 from app.crawler.chat_selectors import (
-    ACCOUNT_IDENTITY_ATTRIBUTES,
-    ACCOUNT_IDENTITY_SELECTOR,
+    ACCOUNT_IDENTITY_COOKIE_NAME,
     BODY_SELECTOR,
     CHAT_INPUT_SELECTOR,
+    CHAT_MESSAGE_LIST_SELECTOR,
     CHAT_MESSAGE_SELECTOR,
     CHAT_PANEL_SELECTOR,
     CHAT_SEND_SELECTOR,
@@ -31,10 +31,6 @@ from app.crawler.chat_selectors import (
     MESSAGE_TIMESTAMP_ATTRIBUTES,
     OPEN_CHAT_SELECTOR,
     OWN_CHAT_MESSAGE_SELECTOR,
-    PRODUCT_IDENTITY_ATTRIBUTES,
-    PRODUCT_IDENTITY_SELECTOR,
-    SELLER_IDENTITY_ATTRIBUTES,
-    SELLER_IDENTITY_SELECTOR,
 )
 from app.crawler.risk_control import RiskControlBlocked, detect_risk
 from app.services.xianyu_account_guard import AccountAccessGuard
@@ -182,6 +178,56 @@ def item_url_matches_binding(url: str, source_item_id: str) -> bool:
     )
 
 
+def chat_url_matches_binding(
+    url: str,
+    source_item_id: str,
+    seller_id: str,
+) -> bool:
+    """
+    严格确认当前 URL 是绑定商品和卖家的闲鱼聊天页。
+
+    参数为页面 URL、商品 ID 和卖家 ID；只接受官方 HTTPS ``/im`` 页面且 ``itemId``、
+    ``peerUserId`` 各自唯一并完全一致。解析失败返回 ``False``，没有网络副作用。
+    """
+
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    return (
+        parsed.scheme == "https"
+        and (parsed.hostname or "").casefold() in {"goofish.com", "www.goofish.com"}
+        and parsed.path.rstrip("/") == "/im"
+        and query.get("itemId") == [source_item_id]
+        and query.get("peerUserId") == [seller_id]
+    )
+
+
+def _parse_chat_entry_href(
+    page_url: str,
+    href: str,
+    source_item_id: str,
+) -> str:
+    """
+    从商品页聊天入口提取唯一卖家 ID。
+
+    输入当前页、入口 href 和商品 ID；返回 ``peerUserId``。URL 非官方、商品不一致或卖家
+    参数缺失/重复时抛出安全异常；只解析字符串。
+    """
+
+    parsed = urlparse(urljoin(page_url, href))
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    seller_ids = query.get("peerUserId", [])
+    if (
+        parsed.scheme != "https"
+        or (parsed.hostname or "").casefold() not in {"goofish.com", "www.goofish.com"}
+        or parsed.path.rstrip("/") != "/im"
+        or query.get("itemId") != [source_item_id]
+        or len(seller_ids) != 1
+        or not IDENTIFIER_PATTERN.fullmatch(seller_ids[0])
+    ):
+        raise ChatSafetyError("chat_entry_identity_invalid", "聊天入口身份参数无法安全确认")
+    return seller_ids[0]
+
+
 def build_message_fingerprint(
     *, message_id: str | None, direction: str, text: str, timestamp: str | None
 ) -> str:
@@ -251,6 +297,29 @@ async def _read_unique_attribute(
     return next(iter(values))
 
 
+async def _assert_account_cookie_identity(page: Page, expected_account_id: str) -> None:
+    """
+    用 ``tracknick`` Cookie 的原值或 SHA-256 指纹确认当前登录买家账号。
+
+    生产配置推荐保存 64 位摘要而非昵称原值。函数只读取当前官方域 Cookie，不返回或记录
+    原值；缺失、重复或不匹配均失败关闭。
+    """
+
+    cookies = await page.context.cookies("https://www.goofish.com")
+    values = {
+        unquote(str(cookie.get("value") or "")).strip()
+        for cookie in cookies
+        if str(cookie.get("name") or "").casefold() == ACCOUNT_IDENTITY_COOKIE_NAME.casefold()
+        and str(cookie.get("value") or "").strip()
+    }
+    if len(values) != 1:
+        raise ChatSafetyError("account_identity_not_confirmed", "无法唯一确认当前闲鱼账号")
+    actual = next(iter(values))
+    actual_fingerprint = hashlib.sha256(actual.encode("utf-8")).hexdigest()
+    if expected_account_id not in {actual, actual_fingerprint}:
+        raise ChatSafetyError("chat_identity_mismatch", "当前闲鱼账号与配置绑定不一致")
+
+
 async def _read_optional_attribute(
     locator: Locator, attribute_names: tuple[str, ...]
 ) -> str | None:
@@ -279,9 +348,9 @@ def _normalize_direction(value: str | None) -> str:
     """
 
     normalized = (value or "").strip().casefold()
-    if normalized in SELF_DIRECTIONS:
+    if normalized in SELF_DIRECTIONS or "msg-text-right--" in normalized:
         return "self"
-    if normalized in SELLER_DIRECTIONS:
+    if normalized in SELLER_DIRECTIONS or "msg-text-left--" in normalized:
         return "seller"
     raise ChatSafetyError("message_direction_not_confirmed", "无法确认最新消息发送方向")
 
@@ -356,34 +425,19 @@ async def discover_chat_binding(
         if not item_url_matches_binding(page.url, source_item_id):
             raise ChatSafetyError("item_url_mismatch", "当前 URL 与绑定闲鱼商品不一致")
 
-        product_node = await _unique_visible_locator(page, PRODUCT_IDENTITY_SELECTOR, "商品身份")
-        product_id = await _read_unique_attribute(
-            product_node,
-            PRODUCT_IDENTITY_ATTRIBUTES,
-            "商品身份",
-        )
-        if product_id != source_item_id:
-            raise ChatSafetyError("chat_identity_mismatch", "商品身份与任务绑定不一致")
-
-        account_node = await _unique_visible_locator(page, ACCOUNT_IDENTITY_SELECTOR, "账号身份")
-        account_id = await _read_unique_attribute(
-            account_node,
-            ACCOUNT_IDENTITY_ATTRIBUTES,
-            "账号身份",
-        )
-        if account_id != expected_account_id:
-            raise ChatSafetyError("chat_identity_mismatch", "账号身份与配置绑定不一致")
-
-        seller_node = await _unique_visible_locator(page, SELLER_IDENTITY_SELECTOR, "卖家身份")
-        seller_id = await _read_unique_attribute(
-            seller_node,
-            SELLER_IDENTITY_ATTRIBUTES,
-            "卖家身份",
-        )
+        await _assert_account_cookie_identity(page, expected_account_id)
+        entry = await _unique_visible_locator(page, OPEN_CHAT_SELECTOR, "聊天入口")
+        entry_text = normalize_chat_text(await entry.inner_text(timeout=2_000))
+        if entry_text != "聊一聊":
+            raise ChatSafetyError("chat_entry_label_changed", "聊天入口文案与标定结果不一致")
+        href = await entry.get_attribute("href")
+        if not href:
+            raise ChatSafetyError("chat_entry_identity_invalid", "聊天入口缺少身份 URL")
+        seller_id = _parse_chat_entry_href(page.url, href, source_item_id)
         return ChatBinding(
             source_item_id=source_item_id,
             seller_id=seller_id,
-            account_id=account_id,
+            account_id=expected_account_id,
         )
 
 
@@ -411,6 +465,21 @@ class XianyuChatClient:
         self._page = page
         self._binding = binding
         self._account_guard = account_guard
+        self._blocked_http_status: int | None = None
+
+        def observe_status(response: Response) -> None:
+            """
+            记录聊天上下文出现的首个 403/429。
+
+            输入 Playwright 响应；无返回；只保存粗粒度状态码，不读取或记录响应正文。
+            """
+
+            if response.status in {403, 429} and self._blocked_http_status is None:
+                self._blocked_http_status = response.status
+
+        # 生产 Playwright BrowserContext 提供 on；离线 FakeContext 不注册网络监听器。
+        if hasattr(self._page.context, "on"):
+            self._page.context.on("response", observe_status)
 
     async def open_conversation(self) -> ChatMessageSnapshot:
         """
@@ -425,8 +494,32 @@ class XianyuChatClient:
             trigger = await _unique_visible_locator(self._page, OPEN_CHAT_SELECTOR, "聊天入口")
             if not await trigger.is_enabled():
                 raise ChatSafetyError("chat_entry_disabled", "聊天入口当前不可用")
+            previous_pages = set(self._page.context.pages)
             await trigger.click(timeout=5_000)
-            await self._page.wait_for_timeout(100)
+            candidates: list[Page] = []
+            for _ in range(20):
+                new_pages = [
+                    page for page in self._page.context.pages if page not in previous_pages
+                ]
+                candidates = [
+                    page
+                    for page in [self._page, *new_pages]
+                    if chat_url_matches_binding(
+                        page.url,
+                        self._binding.source_item_id,
+                        self._binding.seller_id,
+                    )
+                ]
+                if candidates:
+                    break
+                await self._page.wait_for_timeout(250)
+            if len(candidates) != 1:
+                raise ChatSafetyError(
+                    "chat_navigation_not_confirmed",
+                    "点击入口后无法唯一确认绑定聊天页",
+                )
+            self._page = candidates[0]
+            await self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
             await self._assert_bound_identity()
             await self._assert_chat_ready()
             return await self._read_latest_message_unlocked()
@@ -442,6 +535,45 @@ class XianyuChatClient:
             await self._assert_bound_identity()
             await self._assert_chat_ready()
             return await self._read_latest_message_unlocked()
+
+    async def read_messages_after(
+        self,
+        baseline_fingerprint: str,
+    ) -> list[ChatMessageSnapshot]:
+        """
+        按页面顺序读取任务基线之后的全部可见消息。
+
+        输入最近一次已持久化页面消息指纹；返回所有新增快照。基线从可见历史消失、格式
+        无效或消息方向不明时失败关闭，避免漏掉卖家连续回复。
+        """
+
+        if not FINGERPRINT_PATTERN.fullmatch(baseline_fingerprint):
+            raise ChatSafetyError("invalid_message_baseline", "聊天消息基线指纹无效")
+        async with self._account_guard.hold():
+            await self._assert_bound_identity()
+            await self._assert_chat_ready()
+            snapshots = await self._read_visible_messages_unlocked()
+            if not snapshots:
+                return []
+            empty_fingerprint = _empty_conversation_snapshot().fingerprint
+            if baseline_fingerprint == empty_fingerprint:
+                return snapshots
+            baseline_indexes = [
+                index
+                for index, snapshot in enumerate(snapshots)
+                if snapshot.fingerprint == baseline_fingerprint
+            ]
+            if not baseline_indexes:
+                raise ChatSafetyError(
+                    "chat_baseline_not_visible",
+                    "消息基线已不在可见历史中，禁止猜测缺失回复",
+                )
+            if len(baseline_indexes) != 1:
+                raise ChatSafetyError(
+                    "chat_baseline_ambiguous",
+                    "可见历史中存在重复基线，禁止猜测消息边界",
+                )
+            return snapshots[baseline_indexes[0] + 1 :]
 
     async def send_policy_allowed_draft(
         self,
@@ -498,6 +630,8 @@ class XianyuChatClient:
         无输入和返回；风险信号或 body 不唯一时抛出 ``ChatSafetyError``；只读取页面。
         """
 
+        if self._blocked_http_status in {403, 429}:
+            raise ChatSafetyError("http_risk_blocked", "闲鱼聊天上下文返回访问控制状态")
         body = await _unique_visible_locator(self._page, BODY_SELECTOR, "页面主体")
         visible_text = await body.inner_text(timeout=5_000)
         reason = detect_risk(self._page.url, visible_text)
@@ -512,36 +646,28 @@ class XianyuChatClient:
         """
 
         await self._assert_safe()
-        if not item_url_matches_binding(self._page.url, self._binding.source_item_id):
-            raise ChatSafetyError("item_url_mismatch", "当前 URL 与绑定闲鱼商品不一致")
-        checks = (
-            (
-                PRODUCT_IDENTITY_SELECTOR,
-                PRODUCT_IDENTITY_ATTRIBUTES,
-                "商品身份",
-                self._binding.source_item_id,
-            ),
-            (
-                SELLER_IDENTITY_SELECTOR,
-                SELLER_IDENTITY_ATTRIBUTES,
-                "卖家身份",
-                self._binding.seller_id,
-            ),
-            (
-                ACCOUNT_IDENTITY_SELECTOR,
-                ACCOUNT_IDENTITY_ATTRIBUTES,
-                "账号身份",
-                self._binding.account_id,
-            ),
-        )
-        for selector, attributes, label, expected in checks:
-            locator = await _unique_visible_locator(self._page, selector, label)
-            actual = await _read_unique_attribute(locator, attributes, label)
-            if actual != expected:
-                raise ChatSafetyError(
-                    "chat_identity_mismatch",
-                    f"{label} 与任务绑定不一致",
+        await _assert_account_cookie_identity(self._page, self._binding.account_id)
+        if item_url_matches_binding(self._page.url, self._binding.source_item_id):
+            entry = await _unique_visible_locator(self._page, OPEN_CHAT_SELECTOR, "聊天入口")
+            href = await entry.get_attribute("href")
+            seller_id = (
+                _parse_chat_entry_href(
+                    self._page.url,
+                    href,
+                    self._binding.source_item_id,
                 )
+                if href
+                else None
+            )
+            if seller_id != self._binding.seller_id:
+                raise ChatSafetyError("chat_identity_mismatch", "卖家身份与任务绑定不一致")
+            return
+        if not chat_url_matches_binding(
+            self._page.url,
+            self._binding.source_item_id,
+            self._binding.seller_id,
+        ):
+            raise ChatSafetyError("chat_identity_mismatch", "聊天页商品或卖家身份不一致")
 
     async def _assert_chat_ready(self) -> tuple[Locator, Locator]:
         """
@@ -562,18 +688,39 @@ class XianyuChatClient:
         无输入；返回稳定快照或确定性空会话；节点过多或消息不确定时抛出 ``ChatSafetyError``。
         """
 
+        snapshots = await self._read_visible_messages_unlocked()
+        return snapshots[-1] if snapshots else _empty_conversation_snapshot()
+
+    async def _read_visible_messages_unlocked(self) -> list[ChatMessageSnapshot]:
+        """
+        在调用方持有账号 guard 时读取全部可见消息快照。
+
+        无输入；按 DOM 顺序返回快照；历史过长、文本为空或方向不明时失败关闭。
+        """
+
         messages = self._page.locator(CHAT_MESSAGE_SELECTOR)
         count = await messages.count()
         if count > MAX_MESSAGE_NODES:
             raise ChatSafetyError("chat_history_too_large", "聊天消息节点数量超出安全上限")
-        latest: Locator | None = None
+        snapshots: list[ChatMessageSnapshot] = []
         for index in range(count):
             candidate = messages.nth(index)
             if await candidate.is_visible():
-                latest = candidate
-        if latest is None:
-            return _empty_conversation_snapshot()
-        return await _snapshot_message(latest)
+                snapshots.append(await _snapshot_message(candidate))
+        message_list = await _unique_visible_locator(
+            self._page,
+            CHAT_MESSAGE_LIST_SELECTOR,
+            "消息列表",
+        )
+        flex_direction = await message_list.evaluate(
+            "(node) => window.getComputedStyle(node).flexDirection"
+        )
+        if flex_direction == "column-reverse":
+            # 真实闲鱼页把最新消息放在 DOM 前部；对外统一返回从旧到新的时间顺序。
+            snapshots.reverse()
+        elif flex_direction != "column":
+            raise ChatSafetyError("message_order_not_confirmed", "无法确认聊天消息排列顺序")
+        return snapshots
 
     def _assert_unchanged(
         self, latest: ChatMessageSnapshot, expected_latest_fingerprint: str
@@ -633,7 +780,21 @@ class XianyuChatClient:
                 ):
                     matching.append(node)
             if len(matching) > previous_matching_count:
-                return await _snapshot_message(matching[-1], forced_direction="self")
+                message_list = await _unique_visible_locator(
+                    self._page,
+                    CHAT_MESSAGE_LIST_SELECTOR,
+                    "消息列表",
+                )
+                flex_direction = await message_list.evaluate(
+                    "(node) => window.getComputedStyle(node).flexDirection"
+                )
+                if flex_direction not in {"column", "column-reverse"}:
+                    raise ChatSafetyError(
+                        "message_order_not_confirmed",
+                        "无法确认聊天消息排列顺序",
+                    )
+                confirmed = matching[0] if flex_direction == "column-reverse" else matching[-1]
+                return await _snapshot_message(confirmed, forced_direction="self")
             await self._page.wait_for_timeout(SEND_CONFIRMATION_DELAY_MS)
         raise ChatSafetyError(
             "send_confirmation_missing",

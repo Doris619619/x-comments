@@ -51,6 +51,7 @@ services:
       XIANYU_API_TOKEN: "${XIANYU_API_TOKEN:-}"
       CATALOG_SYNC_TOKEN: "${CATALOG_SYNC_TOKEN:-}"
       PROCUREMENT_API_TOKEN: "${PROCUREMENT_API_TOKEN:-}"
+      PROCUREMENT_SOURCE_ITEM_ALLOWLIST: "${PROCUREMENT_SOURCE_ITEM_ALLOWLIST:-}"
     volumes:
       - ./storage_state.json:/app/storage_state.json:ro
     networks:

@@ -25,6 +25,8 @@ from app.models.procurement import (
     ConversationSession,
     ConversationSessionStatus,
     ProcurementAuditActorType,
+    ProcurementAuthorizationSource,
+    ProcurementExecutionMode,
     ProcurementExecutionTask,
     ProcurementExecutionTaskStatus,
     ProcurementNextAction,
@@ -59,6 +61,11 @@ class ProcurementRuntimeTask:
 
     task_id: str
     session_id: str
+    contract_version: int
+    execution_mode: ProcurementExecutionMode
+    auto_send_authorized: bool
+    authorized_at: datetime | None
+    authorization_source: ProcurementAuthorizationSource | None
     source_item_id: str
     item_url: str
     expected_seller_id: str | None
@@ -71,6 +78,7 @@ class ProcurementRuntimeTask:
     next_action: ProcurementNextAction
     session_status: ConversationSessionStatus
     round_count: int
+    seller_poll_attempt_count: int
     latest_inbound_message_id: str | None
     latest_outbound_message_id: str | None
     conversation_baseline_fingerprint: str | None
@@ -161,19 +169,25 @@ class ProcurementSendTransaction:
         self._message = message
         self.finalized = False
 
-    def confirm_sent(self, now: datetime) -> None:
+    def confirm_sent(self, now: datetime, confirmed_fingerprint: str) -> None:
         """
         在页面出现本人同文消息证据后，于持锁事务中确认 sent。
 
-        输入确认时间；无返回；更新消息、轮次、任务、审计和 Outbox，但提交由上下文负责。
+        输入确认时间与页面消息指纹；无返回；更新消息、轮次、页面游标、审计和 Outbox，
+        但提交由上下文负责。
         """
 
         if self.finalized:
             raise RuntimeError("发送事务已经最终化")
+        if len(confirmed_fingerprint) != 64:
+            raise RuntimeError("发送确认消息指纹无效")
         self._message.status = ConversationMessageStatus.SENT
+        self._message.external_message_id = confirmed_fingerprint
         self._message.sent_at = now
         self._message.updated_at = now
         self._conversation.round_count += 1
+        self._conversation.seller_poll_attempt_count = 0
+        self._conversation.conversation_key = confirmed_fingerprint
         self._conversation.last_outbound_at = now
         self._conversation.status = ConversationSessionStatus.WAITING_SELLER
         self._conversation.version += 1
@@ -346,6 +360,14 @@ class ProcurementRuntimeRepository:
             if task is None or task.lease_owner != worker_id:
                 return
             conversation = self._require_conversation(db, task_id)
+            if (
+                not_before is not None
+                and task.status is ProcurementExecutionTaskStatus.AWAITING_SELLER_REPLY
+            ):
+                # 每次进入等待卖家回复阶段只增加一次退避计数；收到回复后会在保存消息时归零。
+                conversation.seller_poll_attempt_count += 1
+            elif task.status is not ProcurementExecutionTaskStatus.AWAITING_SELLER_REPLY:
+                conversation.seller_poll_attempt_count = 0
             task.lease_owner = None
             task.lease_until = not_before
             conversation.lease_owner = None
@@ -482,6 +504,8 @@ class ProcurementRuntimeRepository:
             db.add(message)
             db.flush()
             conversation.latest_inbound_message_id = message.message_id
+            conversation.conversation_key = external_message_id
+            conversation.seller_poll_attempt_count = 0
             conversation.last_inbound_at = observed_at
             conversation.status = ConversationSessionStatus.ACTIVE
             conversation.version += 1
@@ -746,8 +770,9 @@ class ProcurementRuntimeRepository:
                 task is None
                 or task.lease_owner != worker_id
                 or task.status is ProcurementExecutionTaskStatus.CANCELLED
+                or task.auto_send_authorized is not True
             ):
-                raise ProcurementSendNotAllowedError("取消或租约失效后禁止发送")
+                raise ProcurementSendNotAllowedError("取消、授权撤销或租约失效后禁止发送")
             conversation = db.scalar(
                 select(ConversationSession)
                 .where(ConversationSession.task_id == task_id)
@@ -862,11 +887,23 @@ class ProcurementRuntimeRepository:
         with self._session_factory() as db:
             task, conversation = self._require_claim(db, task_id, worker_id)
             task.summary = summary
-            task.status = ProcurementExecutionTaskStatus.AWAITING_PROCUREMENT_REVIEW
-            task.next_action = ProcurementNextAction.HUMAN_REVIEW
+            is_canary = task.execution_mode is ProcurementExecutionMode.OPERATOR_CANARY
+            task.status = (
+                ProcurementExecutionTaskStatus.CANARY_COMPLETED
+                if is_canary
+                else ProcurementExecutionTaskStatus.AWAITING_PROCUREMENT_REVIEW
+            )
+            task.next_action = (
+                ProcurementNextAction.NONE if is_canary else ProcurementNextAction.HUMAN_REVIEW
+            )
             task.reason_code = reason_code
             task.updated_at = now
-            conversation.status = ConversationSessionStatus.HUMAN_REVIEW_REQUIRED
+            if is_canary:
+                task.completed_at = now
+                conversation.status = ConversationSessionStatus.COMPLETED
+                conversation.closed_at = now
+            else:
+                conversation.status = ConversationSessionStatus.HUMAN_REVIEW_REQUIRED
             conversation.version += 1
             conversation.updated_at = now
             append_procurement_audit(
@@ -971,6 +1008,11 @@ class ProcurementRuntimeRepository:
         return ProcurementRuntimeTask(
             task_id=task.task_id,
             session_id=conversation.session_id,
+            contract_version=task.contract_version,
+            execution_mode=task.execution_mode,
+            auto_send_authorized=task.auto_send_authorized,
+            authorized_at=task.authorized_at,
+            authorization_source=task.authorization_source,
             source_item_id=task.source_item_id,
             item_url=conversation.item_url,
             expected_seller_id=conversation.expected_seller_id,
@@ -983,6 +1025,7 @@ class ProcurementRuntimeRepository:
             next_action=task.next_action,
             session_status=conversation.status,
             round_count=conversation.round_count,
+            seller_poll_attempt_count=conversation.seller_poll_attempt_count,
             latest_inbound_message_id=conversation.latest_inbound_message_id,
             latest_outbound_message_id=conversation.latest_outbound_message_id,
             conversation_baseline_fingerprint=conversation.conversation_key,
