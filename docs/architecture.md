@@ -64,7 +64,9 @@ HTTP 请求
 - `app/crawler/item_verifier.py`：单次详情身份、风险、不可售文案和当前价格核验；不写数据库。
   当前真实详情页不使用稳定的 `main` 标签，核验器只等待并读取
   `item-main-info` 容器内的唯一主价格，避免把下方推荐商品价格当成目标商品价格；等待后会再次检查
-  登录/风控与明确下架文案，节点缺失仍返回 unknown，不放宽身份或价格门禁。
+  登录/风控与明确下架文案，节点缺失仍返回 unknown，不放宽身份或价格门禁。业务结果产生后的页面
+  与浏览器清理只忽略精确的 `TargetClosedError`，避免目标已关闭的竞态覆盖结果；导航、身份或价格
+  核验阶段发生同类异常时仍返回 `verification_target_closed` 和 unknown，不重试。
 - `app/models/procurement.py`：本地采购执行任务、会话、消息、追加审计和事务 Outbox。
 - `app/schemas/procurement.py` / `procurement_llm.py`：商城任务、回调事件和 LLM JSON 的严格契约；
   未知字段直接拒绝，模型不能输出购买或付款动作。

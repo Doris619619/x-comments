@@ -25,6 +25,9 @@
 - 当前详情页主价格由客户端延迟渲染，且页面下方同时存在多个推荐商品价格。核验器最多在总预算内
   等待主商品信息区的唯一价格节点，禁止退化为全页模糊价格扫描；若主节点超时、重复或消失，必须
   返回 `unknown` 并停止采购对话。
+- Chromium 或详情页可能在实时核验期间提前关闭。系统只在业务结果已经产生后的清理阶段忽略精确的
+  `TargetClosedError`；业务核验阶段发生同类异常会返回 `verification_target_closed` 和
+  `unknown`，不会重试、放宽账号身份门禁或判断商品可售。
 - 同一账号串行锁覆盖唯一 scheduler-worker 进程；API 可以水平扩容，但 scheduler-worker 必须保持
   单副本。增加 worker 数量会绕过账号锁并提高风控风险，因此不在本 POC 的部署范围内。
 - `POST /api/v1/items/{item_id}/verify` 必须配置 `XIANYU_API_TOKEN` 并由商城服务器携带；未

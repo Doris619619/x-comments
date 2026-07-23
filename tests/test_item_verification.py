@@ -13,7 +13,8 @@ from typing import cast
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from playwright.async_api import Page
+from playwright._impl._errors import TargetClosedError
+from playwright.async_api import Browser, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -21,6 +22,8 @@ from app.core.config import Settings
 from app.crawler.item_verifier import (
     DETAIL_PRICE_WAIT_MAX_MILLISECONDS,
     XianyuItemVerifier,
+    _close_browser_after_verification,
+    _close_page_after_verification,
     find_explicit_unavailable_signal,
     page_matches_target,
     parse_single_price_text,
@@ -134,6 +137,54 @@ class FakeDelayedDetailPage:
         if self.should_timeout:
             raise PlaywrightTimeoutError("offline delayed detail fixture")
         return object()
+
+
+class FakeAlreadyClosedTarget:
+    """
+    模拟 Playwright 目标已先行关闭、再次清理会抛出 TargetClosedError 的对象。
+
+    无初始化输入；close 只记录次数并抛出固定异常，不访问浏览器或网络。
+    """
+
+    def __init__(self) -> None:
+        """初始化关闭调用计数；无异常和外部副作用。"""
+
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        """记录一次重复关闭并抛出目标已关闭异常；不访问外部资源。"""
+
+        self.close_calls += 1
+        raise TargetClosedError("offline target already closed")
+
+
+class FakeUnexpectedCloseError:
+    """
+    模拟清理阶段出现非目标关闭异常的对象。
+
+    无初始化输入；close 抛出 RuntimeError，用于确认修复不会吞掉其他清理故障。
+    """
+
+    async def close(self) -> None:
+        """抛出固定的非 Playwright 关闭异常；不访问外部资源。"""
+
+        raise RuntimeError("offline unexpected cleanup failure")
+
+
+class TargetClosedProbeVerifier(XianyuItemVerifier):
+    """
+    模拟导航业务阶段发生 TargetClosedError 的核验器。
+
+    输入配置；核验不会启动 Playwright，只用于确认业务阶段异常继续失败关闭。
+    """
+
+    async def _verify_once(
+        self, target: VerificationTarget, state_path: Path
+    ) -> LiveVerificationResult:
+        """接收目标和登录态路径后抛出固定异常；不读取文件内容或访问网络。"""
+
+        del target, state_path
+        raise TargetClosedError("offline navigation target closed")
 
 
 def seed_item(session_factory: sessionmaker[Session], item_id: str = "31001") -> None:
@@ -340,6 +391,60 @@ async def test_detail_price_wait_is_bounded_and_keeps_primary_selector(
     ]
     assert "item-main-info--" in DETAIL_PRIMARY_PRICE_SELECTOR
     assert "value--" in DETAIL_PRIMARY_PRICE_SELECTOR
+
+
+@pytest.mark.asyncio
+async def test_cleanup_target_closed_does_not_mask_verification_result() -> None:
+    """
+    验证页面或浏览器已经关闭时，清理动作不会覆盖此前得到的商品核验结果。
+
+    无外部输入；断言两个清理助手各执行一次且正常返回；不启动真实浏览器或网络。
+    """
+
+    page = FakeAlreadyClosedTarget()
+    browser = FakeAlreadyClosedTarget()
+
+    await _close_page_after_verification(cast(Page, page))
+    await _close_browser_after_verification(cast(Browser, browser))
+
+    assert page.close_calls == 1
+    assert browser.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_unexpected_close_error_visible() -> None:
+    """
+    验证修复只忽略 TargetClosedError，不会静默吞掉其他清理异常。
+
+    无外部输入；断言 RuntimeError 原样抛出；不启动真实浏览器或网络。
+    """
+
+    target = FakeUnexpectedCloseError()
+
+    with pytest.raises(RuntimeError, match="unexpected cleanup failure"):
+        await _close_page_after_verification(cast(Page, target))
+
+
+@pytest.mark.asyncio
+async def test_operational_target_closed_returns_specific_unknown() -> None:
+    """
+    验证业务核验阶段关闭页面时仍按失败关闭处理，并返回可诊断的未知状态。
+
+    输入离线夹具路径；断言状态、价格和原因码；不启动真实浏览器或网络。
+    """
+
+    state_path = Path(__file__).parent / "fixtures" / "search_response.json"
+    settings = Settings(
+        xianyu_storage_state_path=str(state_path),
+        xianyu_verify_timeout_seconds=5,
+    )
+    verifier = TargetClosedProbeVerifier(settings)
+
+    result = await verifier.verify(VerificationTarget(item_id="31001"))
+
+    assert result.status is LiveVerificationStatus.UNKNOWN
+    assert result.current_price is None
+    assert result.reason_code == "verification_target_closed"
 
 
 def test_verify_api_requires_configured_bearer_token(client: TestClient) -> None:
