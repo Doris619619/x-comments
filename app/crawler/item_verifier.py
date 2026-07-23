@@ -15,7 +15,11 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.core.config import Settings
 from app.crawler.risk_control import RiskControlBlocked, detect_risk
-from app.crawler.selectors import DETAIL_PRICE_SELECTORS, EXPLICIT_UNAVAILABLE_TEXT_SIGNALS
+from app.crawler.selectors import (
+    DETAIL_PRICE_SELECTORS,
+    DETAIL_PRIMARY_PRICE_SELECTOR,
+    EXPLICIT_UNAVAILABLE_TEXT_SIGNALS,
+)
 from app.services.item_verification import (
     LiveVerificationResult,
     LiveVerificationStatus,
@@ -30,6 +34,8 @@ from app.services.xianyu_account_guard import (
 PRICE_TEXT_PATTERN = re.compile(
     r"(?<![\d.\-])(?:CNY\s*)?[¥￥]?\s*(\d+(?:\.\d{1,2})?)(?![\d.])"
 )
+DETAIL_PRICE_WAIT_MAX_MILLISECONDS = 8_000
+DETAIL_PRICE_WAIT_RESERVE_MILLISECONDS = 2_000
 
 
 def parse_single_price_text(value: str) -> Decimal | None:
@@ -223,6 +229,21 @@ class XianyuItemVerifier:
                     reason_code=f"listing_http_{navigation_status}",
                 )
 
+            # 闲鱼详情主体由客户端延迟渲染。只等待主商品信息区的价格节点，不能用全页
+            # price 类或固定 sleep，否则会误读推荐商品价格或无谓延长已加载页面。
+            await self._wait_for_primary_price(page)
+            visible_text = await page.locator("body").inner_text(timeout=5_000)
+            risk_reason = detect_risk(page.url, visible_text, blocked_status)
+            if risk_reason:
+                raise RiskControlBlocked(risk_reason)
+            unavailable_signal = find_explicit_unavailable_signal(visible_text)
+            if unavailable_signal:
+                return LiveVerificationResult(
+                    status=LiveVerificationStatus.UNAVAILABLE,
+                    current_price=None,
+                    reason_code="listing_explicitly_unavailable",
+                )
+
             current_price = await self._read_current_price(page)
             if current_price is None:
                 return LiveVerificationResult(
@@ -237,6 +258,32 @@ class XianyuItemVerifier:
             )
         finally:
             await page.close()
+
+    async def _wait_for_primary_price(self, page: Page) -> None:
+        """
+        在总核验预算内等待主商品价格完成客户端渲染。
+
+        输入已确认 URL 的详情页；无返回；节点未出现时安静结束并交由后续读取返回
+        ``listing_price_not_found``，不会重试导航、读取推荐价格或放宽身份门禁。
+        """
+
+        timeout_milliseconds = min(
+            DETAIL_PRICE_WAIT_MAX_MILLISECONDS,
+            max(
+                1_000,
+                self.settings.xianyu_verify_timeout_seconds * 1_000
+                - DETAIL_PRICE_WAIT_RESERVE_MILLISECONDS,
+            ),
+        )
+        try:
+            await page.wait_for_selector(
+                DETAIL_PRIMARY_PRICE_SELECTOR,
+                state="visible",
+                timeout=timeout_milliseconds,
+            )
+        except PlaywrightTimeoutError:
+            # 这里保留 unknown 语义；外层总超时和真实风控仍由 verify 统一失败关闭。
+            return
 
     async def _read_current_price(self, page: Page) -> Decimal | None:
         """

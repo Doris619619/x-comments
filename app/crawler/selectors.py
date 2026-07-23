@@ -30,7 +30,14 @@ EXPLICIT_UNAVAILABLE_TEXT_SIGNALS = (
     "商品已被删除",
     "宝贝不存在",
 )
+
+# 真实详情页没有稳定的 main 标签；主商品价格位于 item-main-info 容器内。
+# 该限定可排除页面下方推荐商品的多个 price-- 节点，不能退化为全页模糊价格匹配。
+DETAIL_PRIMARY_PRICE_SELECTOR = (
+    "[class*='item-main-info--'] [class*='value--'] > [class*='price--']"
+)
 DETAIL_PRICE_SELECTORS = (
+    DETAIL_PRIMARY_PRICE_SELECTOR,
     "[data-testid='item-price']",
     "[itemprop='price']",
     "main [class*='ItemPrice']",
