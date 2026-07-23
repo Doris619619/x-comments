@@ -1,7 +1,7 @@
 """
 本文件实现订单绑定闲鱼采购对话的最小、失败关闭编排器。
 
-它属于 services 模块，把来源核验、身份发现、DeepSeek 草稿、确定性策略、受限聊天客户端
+它属于 services 模块，把可信来源快照、身份发现、DeepSeek 草稿、确定性策略、受限聊天客户端
 和短事务仓储串成最多三轮的状态机。它不接收客户资料、不议价、不购买、不付款、不填写
 地址；真实聊天和自动发送分别由两个默认关闭的全局开关控制。
 """
@@ -44,8 +44,6 @@ from app.schemas.procurement import ProcurementEventType, ProcurementObjective
 from app.schemas.procurement_llm import ProcurementDecision, ProcurementLlmOutput
 from app.services.item_verification import (
     LiveItemVerifier,
-    LiveVerificationStatus,
-    VerificationTarget,
 )
 from app.services.procurement_policy import AutoSendContext, evaluate_auto_send, scan_draft_risks
 
@@ -106,7 +104,9 @@ class ProcurementConversationOrchestrator:
         if seller_poll_seconds < 5:
             raise ValueError("卖家回复轮询间隔至少需要 5 秒")
         self._repository = repository
-        self._verifier = verifier
+        # 保留核验器参数只为兼容现有 Worker 装配；彦诗筛选后的采购任务不再调用商品详情核验。
+        # 真正打开聊天时仍由 ChatFactory 校对商品、卖家和买家账号，避免发错会话。
+        self._legacy_verifier = verifier
         self._draft_generator = draft_generator
         self._chat_factory = chat_factory
         self._chat_enabled = chat_enabled
@@ -183,9 +183,9 @@ class ProcurementConversationOrchestrator:
         worker_id: str,
     ) -> datetime | None:
         """
-        在已持有租约时核验来源、打开绑定会话并推进一次对话。
+        在已持有租约时检查可信快照、打开绑定会话并推进一次对话。
 
-        输入不可变任务快照和 Worker；返回可选下一次轮询时间；所有外部动作按核验、草稿、
+        输入不可变任务快照和 Worker；返回可选下一次轮询时间；所有外部动作按绑定、草稿、
         策略、发送顺序执行，发送前必须先提交 ``sending``。
         """
 
@@ -227,31 +227,14 @@ class ProcurementConversationOrchestrator:
             )
             return None
 
-        # 只有首次联系和准备下一次发送前才重新核验来源；等待卖家回复时不重复爬取详情页。
-        requires_live_verification = (
-            task.task_status is ProcurementExecutionTaskStatus.PENDING_SOURCE_VERIFICATION
-            or queued_outbound is not None
-        )
-        if requires_live_verification:
-            verification = await self._verifier.verify(
-                VerificationTarget(item_id=task.source_item_id)
+        if task.task_status is ProcurementExecutionTaskStatus.PENDING_SOURCE_VERIFICATION:
+            # “pending_source_verification” 是已发布 v2 合同中的兼容状态名。这里不再访问闲鱼
+            # 商品详情：本地目录快照来自彦诗筛选源，完成 ID/URL/价格一致性检查后直接进入聊天。
+            self._repository.mark_curated_source_accepted(
+                task.task_id,
+                worker_id,
+                datetime.now(UTC),
             )
-            if verification.status is not LiveVerificationStatus.AVAILABLE:
-                self._record_verification_failure(task, worker_id, verification.status)
-                return None
-            expected_price = Decimal(task.expected_price_cny_minor) / Decimal(100)
-            if verification.current_price != expected_price:
-                self._repository.mark_terminal(
-                    task.task_id,
-                    worker_id,
-                    status=ProcurementExecutionTaskStatus.PRICE_CHANGED,
-                    reason_code="price_changed",
-                    event_type=ProcurementEventType.CONVERSATION_FAILED,
-                    now=datetime.now(UTC),
-                )
-                return None
-            if task.task_status is ProcurementExecutionTaskStatus.PENDING_SOURCE_VERIFICATION:
-                self._repository.mark_source_verified(task.task_id, worker_id, datetime.now(UTC))
 
         async with self._chat_factory.open(
             item_url=task.item_url,
@@ -550,39 +533,6 @@ class ProcurementConversationOrchestrator:
         if not item_url_matches_binding(task.item_url, task.source_item_id):
             return False
         return task.current_price == Decimal(task.expected_price_cny_minor) / Decimal(100)
-
-    def _record_verification_failure(
-        self,
-        task: ProcurementRuntimeTask,
-        worker_id: str,
-        status: LiveVerificationStatus,
-    ) -> None:
-        """
-        将实时核验非 available 结果映射为有限粗粒度任务状态。
-
-        输入任务、Worker 和核验状态；提交终态与事件；不记录页面原因原文。
-        """
-
-        if status is LiveVerificationStatus.UNAVAILABLE:
-            task_status = ProcurementExecutionTaskStatus.SOURCE_SOLD
-            reason = "source_sold"
-            event = ProcurementEventType.CONVERSATION_FAILED
-        elif status is LiveVerificationStatus.BLOCKED:
-            task_status = ProcurementExecutionTaskStatus.BLOCKED_BY_AUTH_OR_RISK_CONTROL
-            reason = "blocked_by_auth_or_risk_control"
-            event = ProcurementEventType.CONVERSATION_BLOCKED
-        else:
-            task_status = ProcurementExecutionTaskStatus.VERIFICATION_TIMEOUT
-            reason = "verification_timeout"
-            event = ProcurementEventType.CONVERSATION_TIMED_OUT
-        self._repository.mark_terminal(
-            task.task_id,
-            worker_id,
-            status=task_status,
-            reason_code=reason,
-            event_type=event,
-            now=datetime.now(UTC),
-        )
 
     def _mark_chat_blocked(
         self,

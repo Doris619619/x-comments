@@ -452,7 +452,7 @@ v1 兼容请求只允许未授权的 `paid_order` 默认值；商城 POC 使用 
 2. 标题未命中客户、联系方式、卡号或支付资料安全规则；
 3. Item 表存在该商品；
 4. 存在最新发布 Catalog 快照；
-5. `availability=active` 且 `currency=CNY`；
+5. 彦诗筛选源的 `availability` 为 `active` 或 `suspected_missing`，且 `currency=CNY`；
 6. 发布价格与 `price_cny_minor` 完全一致；
 7. 同一 `item_id` 没有其他活动采购任务。
 
@@ -468,6 +468,10 @@ v1 兼容请求只允许未授权的 `paid_order` 默认值；商城 POC 使用 
   "created_at": "2026-07-20T10:00:01Z"
 }
 ```
+
+`pending_source_verification` 与 `verify_source` 是 v2 兼容字段名。Worker 不再据此打开闲鱼详情页
+复核库存或价格；它先比较本地 Item、官方 URL 和 CNY 快照，然后进入绑定聊天。聊天页仍会校对商品、
+卖家和买家账号身份。
 
 | 状态码 | code/说明 |
 |--------|-----------|

@@ -60,7 +60,7 @@ HTTP 请求
 - `alembic/`：数据库结构版本。
 - 商城不读取本服务数据库，也不从浏览器直接调用本服务；Catalog 边界保持只读 HTTP，采购任务则只
   允许 shopping 服务端通过独立令牌创建、查询和取消本地执行记录。
-- `app/services/item_verification.py`：只依赖商品存在性协议和实时核验协议，不依赖 ORM 模型。
+- `app/services/item_verification.py`：保留给人工诊断 API 的单商品实时核验服务；采购编排不再调用。
 - `app/crawler/item_verifier.py`：单次详情身份、风险、不可售文案和当前价格核验；不写数据库。
   当前真实详情页不使用稳定的 `main` 标签，核验器只等待并读取
   `item-main-info` 容器内的唯一主价格，避免把下方推荐商品价格当成目标商品价格；等待后会再次检查
@@ -75,7 +75,7 @@ HTTP 请求
 - `app/services/procurement_policy.py`：无副作用的确定性草稿检查；不调用 Playwright，也不发送消息。
 - `app/services/procurement_payload_safety.py`：在任务入库和 AI 调用前扫描商品标题中疑似夹带的客户、
   联系方式、卡号或支付资料；只返回稳定错误码，不回显命中文本。
-- `app/services/procurement_orchestrator.py`：把订单绑定任务、来源实时核验、聊天适配器、DeepSeek 草稿、
+- `app/services/procurement_orchestrator.py`：把订单绑定任务、可信来源快照、聊天适配器、DeepSeek 草稿、
   确定性策略和单次发送事务串联起来；最多三轮，不包含购买、付款或地址动作。
 - `app/services/procurement_outbox.py`：向固定商城回调地址投递有序事件；重试只重试回调，不会触发聊天重发。
 
@@ -99,8 +99,8 @@ HTTP 请求
 采购本地 API 对兼容 v1 请求继续校验 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST`，避免升级后扩大旧调用方
 权限；v2 由商城 Root/可信支付事件写入逐任务授权，不要求每次修改服务器静态白名单。随后扫描标题中
 的疑似客户或支付资料，再以请求幂等键和规范化 body SHA-256 查询原任务；同键同正文返回原任务，
-同键不同正文返回 409。首次创建必须能在 `items` 找到商品，且最新发布 Catalog 快照为 `active`、
-币种为 CNY、价格与商城整数分快照完全一致。通过后在同一短事务中创建
+同键不同正文返回 409。首次创建必须能在 `items` 找到商品，且彦诗筛选源的最新 Catalog 快照为
+`active` 或 `suspected_missing`、币种为 CNY、价格与商城整数分快照完全一致。通过后在同一短事务中创建
 `ProcurementExecutionTask` 与 `ConversationSession`。商品 URL 不接受调用方输入，只从
 `Item.item_url` 复制到内部会话；仓储会先 flush 父任务，再 flush 带外键的会话，避免不同数据库
 对无 ORM relationship 对象采用不同插入顺序。测试 SQLite 显式开启外键约束，确保该 PostgreSQL
@@ -112,7 +112,8 @@ HTTP 请求
 重复执行 Playwright 发送。发送前先持久化 `sending`，并在任务/会话行锁内完成唯一一次点击；崩溃或
 结果不确定时进入人工审核，恢复后不重发。首次打开会话保存既有末条消息指纹作为基线，避免把历史
 消息误认为本次回复；读取时保存基线后的全部新消息，并把页面的 `column-reverse` DOM 顺序还原为
-时间正序。回复轮询按 2、5、10 分钟及后续每 15 分钟退避，最长 24 小时。编排器和投递器只在唯一
+时间正序。采购编排不会再次访问商品详情页核验库存或价格；每次打开聊天仍通过页面绑定确认商品、
+卖家和买家账号。回复轮询按 2、5、10 分钟及后续每 15 分钟退避，最长 24 小时。编排器和投递器只在唯一
 `scheduler_worker` 角色运行。
 
 真实商品页的主“聊一聊”和侧栏“消息”都会指向 `/im`。页面适配器必须等待客户端渲染完成，并只

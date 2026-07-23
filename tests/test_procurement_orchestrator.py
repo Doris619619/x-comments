@@ -1,7 +1,7 @@
 """
 本文件离线验证采购编排器的双开关、身份基线、单次发送与失败关闭行为。
 
-测试只使用 SQLite、fake 核验器、fake 模型和 fake 聊天客户端；不访问闲鱼、DeepSeek、
+测试只使用 SQLite、禁止调用的核验器、fake 模型和 fake 聊天客户端；不访问闲鱼、DeepSeek、
 商城回调或任何真实登录态。
 """
 
@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Never
 from uuid import uuid4
 
 import pytest
@@ -46,7 +47,6 @@ from app.repositories.procurement_runtime import (
     ProcurementSendNotAllowedError,
 )
 from app.schemas.procurement_llm import ProcurementLlmOutput
-from app.services.item_verification import LiveVerificationResult, LiveVerificationStatus
 from app.services.procurement_orchestrator import ProcurementConversationOrchestrator
 
 ITEM_ID = "123456"
@@ -56,21 +56,14 @@ ACCOUNT_ID = "account-001"
 BASELINE = "a" * 64
 
 
-class FakeVerifier:
-    """返回调用方预设结果的离线单商品核验器。"""
+class ForbiddenLiveVerifier:
+    """保证可信来源采购编排绝不会重新访问闲鱼商品详情页。"""
 
-    def __init__(self, result: LiveVerificationResult) -> None:
-        """保存固定核验结果；不访问网络。"""
-
-        self.result = result
-        self.calls = 0
-
-    async def verify(self, target: object) -> LiveVerificationResult:
-        """记录调用并返回固定结果；输入目标仅用于接口兼容。"""
+    async def verify(self, target: object) -> Never:
+        """若编排器意外调用旧核验器则立即让离线测试失败。"""
 
         del target
-        self.calls += 1
-        return self.result
+        raise AssertionError("彦诗筛选商品不应再次执行商品详情实时核验")
 
 
 class FakeDraftGenerator:
@@ -374,16 +367,9 @@ def make_orchestrator(
 ) -> ProcurementConversationOrchestrator:
     """装配完全离线的采购编排器；不访问真实服务。"""
 
-    verifier = FakeVerifier(
-        LiveVerificationResult(
-            status=LiveVerificationStatus.AVAILABLE,
-            current_price=Decimal("108.00"),
-            reason_code="listing_available",
-        )
-    )
     return ProcurementConversationOrchestrator(
         ProcurementRuntimeRepository(session_factory),
-        verifier,
+        ForbiddenLiveVerifier(),
         generator,
         FakeChatFactory(client, error_code=factory_error),
         chat_enabled=True,
