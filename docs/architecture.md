@@ -26,6 +26,7 @@ HTTP 请求
   → shopping 的独立同步容器每 10 分钟经共享 Docker 私有网络调用带 Bearer 认证的 Catalog Sync API
   → GET /api/v1/catalog-sync/changes?after_revision=...
   → shopping 自己的商品镜像和持久化游标（含最多九张的公开详情图库）
+  → 详情图库使用独立总时间预算；预算耗尽时保留搜索页封面并继续发布完整目录
   → app/api → repositories → x-comments PostgreSQL
 
 商城结算核验

@@ -17,6 +17,9 @@ from playwright.async_api import (
     async_playwright,
 )
 from playwright.async_api import (
+    Error as PlaywrightError,
+)
+from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
@@ -113,13 +116,21 @@ class XianyuCrawler:
             all_items: list[ParsedItem] = []
             errors: list[str] = []
             pages_visited = 0
+            # 详情图只是目录增强信息，必须给搜索目录本身保留足够的总执行时间。
+            detail_image_deadline = (
+                monotonic() + self.settings.xianyu_detail_image_budget_seconds
+            )
             payload: dict[str, object] | None = first_payload
             while payload is not None and pages_visited < self.settings.xianyu_max_pages:
                 await self._assert_safe(page, blocked_status)
                 parsed, page_errors = parse_search_response(payload)
                 if not parsed:
                     raise RiskControlBlocked("搜索结果为空或结构异常，无法确认采集正常")
-                detailed_items, detail_errors = await self._enrich_detail_images(context, parsed)
+                detailed_items, detail_errors = await self._enrich_detail_images(
+                    context,
+                    parsed,
+                    deadline=detail_image_deadline,
+                )
                 all_items.extend(detailed_items)
                 errors.extend(page_errors)
                 errors.extend(detail_errors)
@@ -134,7 +145,11 @@ class XianyuCrawler:
             await page.close()
 
     async def _enrich_detail_images(
-        self, context: BrowserContext, items: list[ParsedItem]
+        self,
+        context: BrowserContext,
+        items: list[ParsedItem],
+        *,
+        deadline: float | None = None,
     ) -> tuple[list[ParsedItem], list[str]]:
         """
         顺序读取搜索结果中每件商品的公开详情图库。
@@ -144,25 +159,46 @@ class XianyuCrawler:
             items: 已从搜索响应解析出的商品。
 
         返回：
-            带详情图库的商品及每件非风控失败的错误信息。
+            带详情图库或搜索封面降级的完整商品列表；兼容旧调用保留空错误列表。
 
         异常：
             RiskControlBlocked: 出现登录失效、403/429 或风控时立即向上停止整次任务。
 
         副作用：
-            对每件商品最多打开一次公开详情页。
+            在全局时间预算内顺序打开公开详情页；预算耗尽后不再访问新页面。
         """
 
+        # 详情图库失败不能阻断搜索 API 已确认的商品目录，也不能让 120 秒总任务超时。
+        # 达到预算后保留搜索页封面并停止访问更多详情页，仍按原顺序返回全部商品。
+        detail_deadline = deadline or (
+            monotonic() + self.settings.xianyu_detail_image_budget_seconds
+        )
         enriched: list[ParsedItem] = []
         errors: list[str] = []
-        for item in items:
+        for index, item in enumerate(items):
+            remaining_seconds = detail_deadline - monotonic()
+            if remaining_seconds <= 0:
+                enriched.extend(items[index:])
+                break
             try:
-                enriched.append(await self._read_detail_images(context, item))
+                enriched.append(
+                    await asyncio.wait_for(
+                        self._read_detail_images(context, item),
+                        timeout=min(
+                            remaining_seconds,
+                            float(self.settings.xianyu_verify_timeout_seconds),
+                        ),
+                    )
+                )
             except RiskControlBlocked:
                 raise
-            except (PlaywrightTimeoutError, ValueError) as exc:
+            except (TimeoutError, PlaywrightTimeoutError, ValueError):
                 enriched.append(item)
-                errors.append(f"item {item.item_id} detail images: {type(exc).__name__}")
+            except PlaywrightError:
+                # 浏览器上下文异常时不继续打开新页面；搜索响应中的商品仍可安全发布。
+                enriched.append(item)
+                enriched.extend(items[index + 1 :])
+                break
         return enriched, errors
 
     async def _read_detail_images(self, context: BrowserContext, item: ParsedItem) -> ParsedItem:
