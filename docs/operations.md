@@ -4,6 +4,57 @@
 x-comments 使用 PostgreSQL，shopping 使用 MongoDB；shopping 只经 Docker 私有网络调用受 Bearer
 保护的 Catalog Sync API，绝不直连 PostgreSQL。
 
+兼容旧 v1 调用方时，可配置 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 为英文逗号分隔的闲鱼
+`item_id`；留空只会拒绝 v1，不会给 v2 增加权限。v2 Canary 由商城 Root 手工复输商品 ID 后逐任务
+授权。POC 阶段 `PROCUREMENT_CHAT_ENABLED=false`、`PROCUREMENT_AUTO_SEND_ENABLED=false`
+保持关闭。以后仅做一个白名单商品的低流量 Canary 时，也必须人工复核商品 ID 与商城任务级授权，
+且不得把客户资料、支付资料、Cookie 或账号密码写入环境变量。
+
+## 采购聊天部署与只读标定
+
+先部署数据库迁移和代码，但保持下面两个生产开关关闭：
+
+```dotenv
+PROCUREMENT_CHAT_ENABLED=false
+PROCUREMENT_AUTO_SEND_ENABLED=false
+```
+
+部署后执行 `alembic upgrade head`，再重启 API 与唯一的 scheduler-worker。关闭聊天开关会停止领取
+新的聊天动作；重新开启前必须先取消已经过期的排队任务，不能让旧任务在恢复时突然发送。
+
+真实页面选择器已经在服务器现有登录态上完成一次只读标定：商品聊天入口使用“聊一聊”，聊天输入框
+使用页面明确的消息占位文本，发送按钮和消息方向使用稳定 class 前缀；消息列表是
+`column-reverse`，客户端会转换为时间正序。账号绑定使用登录态 `tracknick` 的 SHA-256，不在环境、
+日志或标定报告保存原账号文本。生产只配置 64 位小写十六进制摘要：
+
+```dotenv
+XIANYU_EXPECTED_ACCOUNT_ID=<只读标定得到的 tracknick SHA-256>
+```
+
+页面结构变化后只能运行只读标定脚本；它不得填写输入框、点击发送或输出聊天正文：
+
+```bash
+xvfb-run -a python scripts/calibrate_procurement_chat_dom.py \
+  --item-id <经人工批准的真实商品 ID>
+```
+
+标定结果只保留选择器计数、消息方向布局、URL 参数名的摘要和账号匹配结果，不保存 Cookie、真实卖家
+身份或聊天内容。遇到登录失效、验证码、403、429、商品/卖家/账号不一致或 DOM 不唯一时立即停止。
+
+回复轮询按“发送后 2 分钟、5 分钟、10 分钟、此后每 15 分钟”退避，最长等待 24 小时。每次读取
+基线后的全部新消息，不只取最后一条。只有首次发送和准备再次发送前重新核验商品价格与可售状态；
+等待回复本身不会重复执行完整核验。页面点击后若无法确认出现同正文的本人消息，直接转人工且不重试。
+
+上线顺序必须是：
+
+1. 两个开关均关闭，验证迁移、API、任务和后台消息时间线；
+2. 只打开聊天开关，验证实时核验和 DeepSeek 草稿，确认页面没有发送；
+3. 由 Root 创建一个 `operator_canary`，人工复输商品 ID 并单独授权；
+4. 再打开自动发送开关，只验收一条正常库存询问；
+5. 验收连续回复、三轮上限、重复回调、崩溃恢复和强制停止后，再讨论已付款订单。
+
+任一阶段都不自动拍下、付款、填写地址、确认收货或处理验证码。
+
 ## PostgreSQL 每日备份
 
 `scripts/backup_postgres.sh` 通过 PostgreSQL 容器内的 `pg_dump` 产生 custom-format 逻辑备份，并在

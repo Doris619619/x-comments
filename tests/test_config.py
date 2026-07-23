@@ -49,3 +49,41 @@ def test_procurement_auto_send_defaults_closed_and_has_hard_limits() -> None:
         Settings(procurement_auto_send_min_confidence=0.5)
     with pytest.raises(ValidationError):
         Settings(procurement_max_auto_rounds=4)
+
+
+def test_procurement_source_allowlist_is_normalized_and_rejects_unsafe_ids() -> None:
+    """
+    验证采购商品白名单去重、去空白并只接受稳定数字 item_id。
+
+    无输入；断言失败抛出 AssertionError；配置校验不访问数据库或网络。
+    """
+
+    settings = Settings(
+        procurement_source_item_allowlist=" 81001,81002,81001 ",
+    )
+
+    assert settings.procurement_source_item_allowlist == "81001,81002"
+    assert settings.procurement_source_item_ids == frozenset({"81001", "81002"})
+
+    with pytest.raises(ValidationError, match="只能包含数字"):
+        Settings(procurement_source_item_allowlist="81001,not-an-item")
+
+
+def test_chat_requires_hashed_account_identity() -> None:
+    """
+    验证开启聊天时拒绝账号昵称明文，只接受只读标定得到的 SHA-256。
+
+    无输入；断言失败抛出 AssertionError；不读取真实 Cookie、登录态或外部服务。
+    """
+
+    common = {
+        "procurement_chat_enabled": True,
+        "deepseek_api_key": "test-key",
+        "shopping_callback_url": "http://shopping.test/callback",
+        "shopping_procurement_token": "t" * 32,
+    }
+    with pytest.raises(ValidationError, match="tracknick SHA-256"):
+        Settings(**common, xianyu_expected_account_id="nickname-plaintext")
+
+    settings = Settings(**common, xianyu_expected_account_id="a" * 64)
+    assert settings.xianyu_expected_account_id == "a" * 64

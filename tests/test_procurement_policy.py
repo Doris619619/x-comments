@@ -60,6 +60,7 @@ def safe_context() -> AutoSendContext:
 
     return AutoSendContext(
         enabled=True,
+        task_auto_send_authorized=True,
         session_status=ConversationSessionStatus.ACTIVE,
         round_count=0,
         max_auto_rounds=3,
@@ -93,6 +94,7 @@ def test_auto_send_is_closed_by_default() -> None:
 
     assert decision.allowed is False
     assert AutoSendReason.AUTO_SEND_DISABLED in decision.reason_codes
+    assert AutoSendReason.TASK_AUTO_SEND_NOT_AUTHORIZED in decision.reason_codes
 
 
 def test_safe_whitelisted_draft_is_allowed_when_all_guards_pass() -> None:

@@ -32,6 +32,8 @@ from app.models.procurement import (
     ConversationSenderRole,
     ConversationSession,
     ConversationSessionStatus,
+    ProcurementAuthorizationSource,
+    ProcurementExecutionMode,
     ProcurementExecutionTask,
     ProcurementExecutionTaskStatus,
     ProcurementNextAction,
@@ -156,6 +158,16 @@ class FakeChatClient:
 
         return self.latest
 
+    async def read_messages_after(
+        self,
+        baseline_fingerprint: str,
+    ) -> list[ChatMessageSnapshot]:
+        """返回基线之后的固定新增消息，模拟不遗漏的批量读取。"""
+
+        if baseline_fingerprint == self.latest.fingerprint or self.latest.direction == "none":
+            return []
+        return [self.latest]
+
     async def send_policy_allowed_draft(
         self,
         draft: PolicyAllowedDraft,
@@ -170,6 +182,13 @@ class FakeChatClient:
         self.send_calls += 1
         if self.fail_send:
             raise ChatSafetyError("send_confirmation_missing", "离线模拟发送结果不确定")
+        self.latest = ChatMessageSnapshot(
+            "confirmed-self-message",
+            "self",
+            draft.text,
+            "2",
+            "c" * 64,
+        )
         return SendEvidence(
             source_item_id=ITEM_ID,
             seller_id=SELLER_ID,
@@ -261,6 +280,11 @@ def seed_task(
         )
         task = ProcurementExecutionTask(
             task_id=task_id,
+            contract_version=2,
+            execution_mode=ProcurementExecutionMode.PAID_ORDER,
+            auto_send_authorized=True,
+            authorized_at=now,
+            authorization_source=ProcurementAuthorizationSource.VERIFIED_PAYMENT_EVENT,
             source_item_id=ITEM_ID,
             expected_title="日本語の商品タイトル",
             expected_price_cny_minor=10800,

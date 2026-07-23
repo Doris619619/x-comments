@@ -4,6 +4,7 @@
 它属于 core 模块，为数据库、API 和爬虫提供只读配置，不读取登录态内容。
 """
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     procurement_auto_send_min_confidence: float = Field(default=0.85, ge=0.8, le=1.0)
     procurement_max_auto_rounds: int = Field(default=3, ge=1, le=3)
     procurement_api_token: SecretStr | None = None
+    procurement_source_item_allowlist: str = ""
     procurement_worker_poll_seconds: int = Field(default=5, ge=1, le=60)
     procurement_task_lease_seconds: int = Field(default=90, ge=30, le=300)
     procurement_seller_poll_seconds: int = Field(default=15, ge=5, le=300)
@@ -82,6 +84,31 @@ class Settings(BaseSettings):
             return value if value.get_secret_value().strip() else None
         return value if str(value).strip() else None
 
+    @field_validator("procurement_source_item_allowlist")
+    @classmethod
+    def normalize_procurement_source_item_allowlist(cls, value: str) -> str:
+        """
+        规范化采购商品白名单并拒绝不稳定的闲鱼商品标识。
+
+        输入英文逗号分隔的 item_id；返回去重后的同格式字符串；含非数字或超长值时
+        抛出 ValueError，无外部副作用。
+        """
+
+        items = [item.strip() for item in str(value or "").split(",") if item.strip()]
+        if any(not item.isdigit() or len(item) > 64 for item in items):
+            raise ValueError("PROCUREMENT_SOURCE_ITEM_ALLOWLIST 只能包含数字 item_id")
+        return ",".join(dict.fromkeys(items))
+
+    @property
+    def procurement_source_item_ids(self) -> frozenset[str]:
+        """
+        返回采购 API 可以接受的闲鱼商品 ID 集合。
+
+        无输入；返回不可变集合；空集合表示失败关闭，不访问数据库或网络。
+        """
+
+        return frozenset(item for item in self.procurement_source_item_allowlist.split(",") if item)
+
     @model_validator(mode="after")
     def validate_procurement_worker_settings(self) -> "Settings":
         """
@@ -107,8 +134,13 @@ class Settings(BaseSettings):
         ):
             raise ValueError("SHOPPING_CALLBACK_URL 必须使用 HTTP 或 HTTPS")
         if self.procurement_chat_enabled:
-            if not (self.xianyu_expected_account_id or "").strip():
+            expected_account = (self.xianyu_expected_account_id or "").strip()
+            if not expected_account:
                 raise ValueError("采购聊天开启时必须配置 XIANYU_EXPECTED_ACCOUNT_ID")
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_account):
+                raise ValueError(
+                    "XIANYU_EXPECTED_ACCOUNT_ID 必须是只读标定得到的 tracknick SHA-256"
+                )
             if self.deepseek_api_key is None:
                 raise ValueError("采购聊天开启时必须配置 DEEPSEEK_API_KEY")
             if not callback_configured:

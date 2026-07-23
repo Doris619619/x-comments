@@ -16,8 +16,11 @@ from app.models.procurement import (
     ConversationMessageStatus,
     ConversationSenderRole,
     ConversationSessionStatus,
+    ProcurementAuthorizationSource,
+    ProcurementExecutionMode,
     ProcurementExecutionTaskStatus,
     ProcurementNextAction,
+    ProcurementPolicyResult,
 )
 
 ProcurementExecutionStatus = ProcurementExecutionTaskStatus
@@ -109,8 +112,12 @@ class ProcurementTaskCreate(StrictProcurementModel):
     任务只含公开来源和目标，不允许携带日本客户地址、电话或支付信息。
     """
 
-    contract_version: Literal[1] = 1
+    contract_version: Literal[1, 2] = 1
     task_id: UUID
+    execution_mode: ProcurementExecutionMode = ProcurementExecutionMode.PAID_ORDER
+    auto_send_authorized: bool = False
+    authorized_at: datetime | None = None
+    authorization_source: ProcurementAuthorizationSource | None = None
     source: ProcurementSource
     expected_listing: ProcurementExpectedListing
     objectives: list[ProcurementObjective] = Field(min_length=1, max_length=5)
@@ -131,6 +138,40 @@ class ProcurementTaskCreate(StrictProcurementModel):
             raise ValueError("objectives 不能重复")
         return value
 
+    @model_validator(mode="after")
+    def validate_execution_authorization(self) -> "ProcurementTaskCreate":
+        """
+        失败关闭校验 v1 兼容默认值与 v2 单任务授权来源。
+
+        输入已解析任务并返回自身；任何缺少可信授权时间、来源或模式不匹配都会拒绝请求。
+        """
+
+        if self.contract_version == 1:
+            if (
+                self.execution_mode is not ProcurementExecutionMode.PAID_ORDER
+                or self.auto_send_authorized
+                or self.authorized_at is not None
+                or self.authorization_source is not None
+            ):
+                raise ValueError("v1 任务只能按未授权 paid_order 处理")
+            return self
+
+        if not self.auto_send_authorized:
+            if self.authorized_at is not None or self.authorization_source is not None:
+                raise ValueError("未授权任务不能携带授权时间或来源")
+            return self
+
+        if self.authorized_at is None or self.authorization_source is None:
+            raise ValueError("自动发送授权必须同时包含时间和可信来源")
+        expected_source = (
+            ProcurementAuthorizationSource.OPERATOR_CANARY
+            if self.execution_mode is ProcurementExecutionMode.OPERATOR_CANARY
+            else ProcurementAuthorizationSource.VERIFIED_PAYMENT_EVENT
+        )
+        if self.authorization_source is not expected_source:
+            raise ValueError("执行模式与授权来源不匹配")
+        return self
+
 
 class ProcurementTaskAccepted(StrictProcurementModel):
     """
@@ -139,7 +180,7 @@ class ProcurementTaskAccepted(StrictProcurementModel):
     相同任务与幂等键必须返回相同 session_id；序列化无副作用。
     """
 
-    contract_version: Literal[1] = 1
+    contract_version: Literal[1, 2] = 1
     task_id: UUID
     session_id: UUID
     status: ProcurementExecutionStatus
@@ -156,6 +197,11 @@ class ProcurementExecutionTaskRead(StrictProcurementModel):
 
     task_id: UUID
     session_id: UUID
+    contract_version: Literal[1, 2]
+    execution_mode: ProcurementExecutionMode
+    auto_send_authorized: bool
+    authorized_at: datetime | None
+    authorization_source: ProcurementAuthorizationSource | None
     source_item_id: str
     expected_title: str
     expected_price_cny_minor: int
@@ -231,8 +277,12 @@ class ConversationMessageRead(StrictProcurementModel):
     content: str
     intent: str | None
     status: ConversationMessageStatus
+    llm_model: str | None
+    prompt_version: str | None
+    llm_confidence: float | None
     risk_flags: list[str]
     requires_human_review: bool
+    policy_result: ProcurementPolicyResult
     policy_reason_codes: list[str]
     observed_at: datetime | None
     generated_at: datetime | None
@@ -259,7 +309,7 @@ class ProcurementEvent(StrictProcurementModel):
     data 只能放脱敏摘要、消息序号和策略码，不得放完整聊天、客户信息或登录态。
     """
 
-    contract_version: Literal[1] = 1
+    contract_version: Literal[1, 2] = 1
     event_id: UUID
     event_seq: int = Field(ge=1)
     event_type: ProcurementEventType

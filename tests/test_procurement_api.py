@@ -17,7 +17,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.models.catalog_keyword import CatalogKeyword
 from app.models.catalog_sync import CatalogAvailability, CatalogChange
-from app.models.procurement import ConversationSession, ProcurementExecutionTask
+from app.models.procurement import (
+    ConversationMessage,
+    ConversationMessageDirection,
+    ConversationMessageStatus,
+    ConversationSenderRole,
+    ConversationSession,
+    ProcurementExecutionTask,
+)
 from app.repositories.catalog_sync import CatalogSyncRepository
 from app.repositories.jobs import JobRepository
 from app.schemas.item import ParsedItem
@@ -28,15 +35,19 @@ PROCUREMENT_HEADERS = {
 }
 
 
-def procurement_payload(item_id: str = "81001", price_cny_minor: int = 1250) -> dict[str, object]:
+def procurement_payload(
+    item_id: str = "81001",
+    price_cny_minor: int = 1250,
+    contract_version: int = 1,
+) -> dict[str, object]:
     """
     创建不含客户资料和商品 URL 的最小采购任务请求。
 
-    输入商品 ID 与整数分价格，返回新字典；无异常和外部副作用。
+    输入商品 ID、整数分价格和契约版本，返回新字典；无异常和外部副作用。
     """
 
     return {
-        "contract_version": 1,
+        "contract_version": contract_version,
         "task_id": str(uuid.uuid4()),
         "source": {
             "platform": "xianyu",
@@ -132,6 +143,107 @@ def test_procurement_api_requires_independent_configured_token(client: TestClien
     assert disabled.status_code == 503
 
 
+def test_legacy_v1_create_fails_closed_without_source_allowlist(client: TestClient) -> None:
+    """
+    验证旧版 v1 商品白名单未配置时返回 503，而不是扩大旧调用方权限。
+
+    输入测试客户端；断言失败抛出 AssertionError；校验发生在数据库写入和聊天前。
+    """
+
+    application = cast(FastAPI, client.app)
+    application.state.procurement_source_item_allowlist = frozenset()
+
+    response = client.post(
+        "/api/v1/procurement-tasks",
+        json=procurement_payload(contract_version=1),
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-empty-allowlist-v1",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "procurement_allowlist_not_configured"
+
+
+def test_legacy_v1_create_rejects_source_item_outside_allowlist(client: TestClient) -> None:
+    """
+    验证旧版 v1 未获运维批准的闲鱼商品返回 403。
+
+    输入测试客户端；断言失败抛出 AssertionError；不查询商品、不创建任务或聊天会话。
+    """
+
+    response = client.post(
+        "/api/v1/procurement-tasks",
+        json=procurement_payload(item_id="99999", contract_version=1),
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-denied-item-v1",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "source_item_not_allowlisted"
+
+
+def test_v2_create_uses_task_authorization_instead_of_static_allowlist(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """
+    验证 v2 可由商城逐任务授权，不要求每个商品预先写入服务器环境变量。
+
+    输入隔离客户端和数据库；断言失败抛出 AssertionError；只创建测试任务，不运行聊天。
+    """
+
+    seed_active_catalog_item(session_factory)
+    application = cast(FastAPI, client.app)
+    application.state.procurement_source_item_allowlist = frozenset()
+
+    response = client.post(
+        "/api/v1/procurement-tasks",
+        json=procurement_payload(contract_version=2),
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-v2-task-authorization",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["contract_version"] == 2
+
+
+def test_create_rejects_sensitive_text_hidden_in_listing_title(client: TestClient) -> None:
+    """
+    验证商品标题疑似夹带邮箱、电话或支付资料时统一返回安全错误。
+
+    输入测试客户端；断言失败抛出 AssertionError；响应不回显命中的敏感正文。
+    """
+
+    unsafe_titles = (
+        "采购测试遥控器 customer@example.com",
+        "采购测试遥控器 电话 13800138000",
+        "采购测试遥控器 卡号 4111 1111 1111 1111",
+    )
+    for index, title in enumerate(unsafe_titles, start=1):
+        payload = procurement_payload()
+        expected_listing = payload["expected_listing"]
+        assert isinstance(expected_listing, dict)
+        expected_listing["title"] = title
+        response = client.post(
+            "/api/v1/procurement-tasks",
+            json=payload,
+            headers={
+                **PROCUREMENT_HEADERS,
+                "Idempotency-Key": f"procurement-sensitive-title-{index:04d}",
+            },
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == {"code": "unsafe_procurement_payload"}
+        assert title not in response.text
+
+
 def test_create_returns_202_and_persists_server_side_source_snapshot(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
@@ -144,9 +256,7 @@ def test_create_returns_202_and_persists_server_side_source_snapshot(
     item_url = seed_active_catalog_item(session_factory)
     payload = procurement_payload()
 
-    response = client.post(
-        "/api/v1/procurement-tasks", json=payload, headers=PROCUREMENT_HEADERS
-    )
+    response = client.post("/api/v1/procurement-tasks", json=payload, headers=PROCUREMENT_HEADERS)
 
     assert response.status_code == 202
     body = response.json()
@@ -207,6 +317,39 @@ def test_create_is_idempotent_and_conflicting_body_returns_409(
         session_count = session.scalar(select(func.count()).select_from(ConversationSession))
     assert task_count == 1
     assert session_count == 1
+
+
+def test_same_source_item_allows_only_one_active_task(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """
+    验证同一闲鱼商品同时只能存在一个活动订单或 Canary 任务。
+
+    输入测试客户端和隔离数据库；第二个任务返回 409，不并行创建聊天会话。
+    """
+
+    seed_active_catalog_item(session_factory, item_id="81006")
+    first = client.post(
+        "/api/v1/procurement-tasks",
+        json=procurement_payload(item_id="81006"),
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-source-lock-000001",
+        },
+    )
+    second = client.post(
+        "/api/v1/procurement-tasks",
+        json=procurement_payload(item_id="81006"),
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-source-lock-000002",
+        },
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert second.json()["detail"]["code"] == "source_item_has_active_procurement"
 
 
 def test_create_rejects_missing_item_and_changed_price(
@@ -332,3 +475,77 @@ def test_get_and_cancel_update_only_local_execution_state(
     assert cancelled.json()["next_action"] == "none"
     assert repeated.status_code == 200
     assert repeated.json() == cancelled.json()
+
+
+def test_messages_endpoint_returns_full_plain_text_incrementally(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """
+    验证内部消息接口按序返回卖家原文和 AI 草稿，并支持 after_seq 游标。
+
+    输入客户端和隔离数据库；正文只在受令牌保护的内部接口返回。
+    """
+
+    seed_active_catalog_item(session_factory, item_id="81007")
+    payload = procurement_payload(item_id="81007")
+    created = client.post(
+        "/api/v1/procurement-tasks",
+        json=payload,
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-message-page-0001",
+        },
+    )
+    task_id = created.json()["task_id"]
+    with session_factory() as session:
+        conversation = session.scalar(
+            select(ConversationSession).where(ConversationSession.task_id == task_id)
+        )
+        assert conversation is not None
+        session.add_all(
+            [
+                ConversationMessage(
+                    session_id=conversation.session_id,
+                    seq=1,
+                    direction=ConversationMessageDirection.INBOUND,
+                    sender_role=ConversationSenderRole.SELLER,
+                    external_message_id="seller-message-1",
+                    content="还在，可以正常使用",
+                    content_hash="a" * 64,
+                    status=ConversationMessageStatus.RECEIVED,
+                    idempotency_key="b" * 64,
+                    risk_flags=[],
+                    policy_reason_codes=[],
+                ),
+                ConversationMessage(
+                    session_id=conversation.session_id,
+                    seq=2,
+                    direction=ConversationMessageDirection.OUTBOUND,
+                    sender_role=ConversationSenderRole.BUYER,
+                    content="请问近期可以发货吗？",
+                    content_hash="c" * 64,
+                    intent="shipping_check",
+                    status=ConversationMessageStatus.DRAFTED,
+                    idempotency_key="d" * 64,
+                    risk_flags=[],
+                    policy_reason_codes=[],
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.get(
+        f"/api/v1/procurement-tasks/{task_id}/messages?after_seq=0&limit=1",
+        headers=PROCUREMENT_HEADERS,
+    )
+    second = client.get(
+        f"/api/v1/procurement-tasks/{task_id}/messages?after_seq=1&limit=100",
+        headers=PROCUREMENT_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][0]["content"] == "还在，可以正常使用"
+    assert response.json()["has_more"] is True
+    assert second.status_code == 200
+    assert second.json()["messages"][0]["content"] == "请问近期可以发货吗？"

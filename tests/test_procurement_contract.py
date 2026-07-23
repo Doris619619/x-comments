@@ -121,6 +121,37 @@ def test_task_contract_rejects_customer_pii_and_caller_supplied_item_url() -> No
         ProcurementTaskCreate.model_validate(payload)
 
 
+def test_v1_defaults_to_unapproved_paid_order_and_v2_requires_matching_source() -> None:
+    """
+    验证旧任务升级后不会意外发送，且 v2 授权必须与执行模式和时间同时匹配。
+
+    无输入；只执行 Pydantic 校验，不访问数据库或页面。
+    """
+
+    legacy = ProcurementTaskCreate.model_validate(valid_task_payload())
+    assert legacy.execution_mode.value == "paid_order"
+    assert legacy.auto_send_authorized is False
+    assert legacy.authorized_at is None
+    assert legacy.authorization_source is None
+
+    canary_payload = valid_task_payload()
+    canary_payload.update(
+        {
+            "contract_version": 2,
+            "execution_mode": "operator_canary",
+            "auto_send_authorized": True,
+            "authorized_at": datetime.now(UTC).isoformat(),
+            "authorization_source": "operator_canary",
+        }
+    )
+    canary = ProcurementTaskCreate.model_validate(canary_payload)
+    assert canary.auto_send_authorized is True
+
+    invalid = {**canary_payload, "authorization_source": "verified_payment_event"}
+    with pytest.raises(ValidationError):
+        ProcurementTaskCreate.model_validate(invalid)
+
+
 def test_llm_contract_rejects_invalid_json_extra_fields_and_conflicting_decision() -> None:
     """
     验证非法 JSON、未知字段及风险与自动对话冲突都会安全失败。

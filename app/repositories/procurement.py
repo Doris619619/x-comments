@@ -16,8 +16,11 @@ from sqlalchemy.orm import Session
 from app.models.catalog_sync import CatalogAvailability, CatalogChange, CatalogRevision
 from app.models.item import Item
 from app.models.procurement import (
+    ConversationMessage,
     ConversationSession,
     ConversationSessionStatus,
+    ProcurementAuthorizationSource,
+    ProcurementExecutionMode,
     ProcurementExecutionTask,
     ProcurementExecutionTaskStatus,
     ProcurementNextAction,
@@ -58,6 +61,11 @@ class NewProcurementExecutionTask:
     """
 
     task_id: str
+    contract_version: int
+    execution_mode: ProcurementExecutionMode
+    auto_send_authorized: bool
+    authorized_at: datetime | None
+    authorization_source: ProcurementAuthorizationSource | None
     source_item_id: str
     expected_title: str
     expected_price_cny_minor: int
@@ -136,6 +144,31 @@ class ProcurementRepository:
             )
         )
 
+    def get_active_by_source_item_id(
+        self,
+        source_item_id: str,
+    ) -> ProcurementExecutionTask | None:
+        """
+        查询同一来源商品当前是否已有活动采购任务。
+
+        输入闲鱼商品 ID；返回活动任务或 None；只读数据库，不暴露消息正文。
+        """
+
+        active_statuses = (
+            ProcurementExecutionTaskStatus.PENDING_SOURCE_VERIFICATION,
+            ProcurementExecutionTaskStatus.CONTACTING_SELLER,
+            ProcurementExecutionTaskStatus.AWAITING_SELLER_REPLY,
+            ProcurementExecutionTaskStatus.AWAITING_PROCUREMENT_REVIEW,
+        )
+        return self.session.scalar(
+            select(ProcurementExecutionTask)
+            .where(
+                ProcurementExecutionTask.source_item_id == source_item_id,
+                ProcurementExecutionTask.status.in_(active_statuses),
+            )
+            .limit(1)
+        )
+
     def get_session_by_task_id(self, task_id: str) -> ConversationSession | None:
         """
         返回任务唯一关联的聊天会话。
@@ -159,6 +192,11 @@ class ProcurementRepository:
 
         task = ProcurementExecutionTask(
             task_id=command.task_id,
+            contract_version=command.contract_version,
+            execution_mode=command.execution_mode,
+            auto_send_authorized=command.auto_send_authorized,
+            authorized_at=command.authorized_at,
+            authorization_source=command.authorization_source,
             source_item_id=command.source_item_id,
             expected_title=command.expected_title,
             expected_price_cny_minor=command.expected_price_cny_minor,
@@ -195,6 +233,35 @@ class ProcurementRepository:
         self.session.refresh(task)
         self.session.refresh(conversation)
         return task, conversation
+
+    def list_messages(
+        self,
+        task_id: str,
+        *,
+        after_seq: int,
+        limit: int,
+    ) -> tuple[list[ConversationMessage], bool]:
+        """
+        按会话序号分页读取完整采购聊天记录。
+
+        输入任务、游标和上限；返回有序消息及是否还有下一页；只读数据库且不写日志。
+        """
+
+        conversation = self.get_session_by_task_id(task_id)
+        if conversation is None:
+            return [], False
+        rows = list(
+            self.session.scalars(
+                select(ConversationMessage)
+                .where(
+                    ConversationMessage.session_id == conversation.session_id,
+                    ConversationMessage.seq > after_seq,
+                )
+                .order_by(ConversationMessage.seq.asc())
+                .limit(limit + 1)
+            )
+        )
+        return rows[:limit], len(rows) > limit
 
     def cancel(
         self,

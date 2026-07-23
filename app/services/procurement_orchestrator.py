@@ -50,9 +50,14 @@ from app.services.item_verification import (
 from app.services.procurement_policy import AutoSendContext, evaluate_auto_send, scan_draft_risks
 
 MAX_AUTO_ROUNDS = 3
+SELLER_REPLY_BACKOFF_SECONDS = (120, 300, 600, 900)
 PROMPT_INJECTION_PATTERN = re.compile(
     r"(?:忽略.{0,12}(?:指令|规则|系统)|system\s+prompt|developer\s+message|"
     r"ignore.{0,20}(?:instruction|previous)|你现在是.{0,20}(?:助手|系统))",
+    re.I,
+)
+SELLER_PURCHASE_ESCALATION_PATTERN = re.compile(
+    r"(?:现在拍吗|要不要拍|可以拍下|直接拍|什么时候付款|等你付款|给你改价)",
     re.I,
 )
 
@@ -222,23 +227,31 @@ class ProcurementConversationOrchestrator:
             )
             return None
 
-        verification = await self._verifier.verify(VerificationTarget(item_id=task.source_item_id))
-        if verification.status is not LiveVerificationStatus.AVAILABLE:
-            self._record_verification_failure(task, worker_id, verification.status)
-            return None
-        expected_price = Decimal(task.expected_price_cny_minor) / Decimal(100)
-        if verification.current_price != expected_price:
-            self._repository.mark_terminal(
-                task.task_id,
-                worker_id,
-                status=ProcurementExecutionTaskStatus.PRICE_CHANGED,
-                reason_code="price_changed",
-                event_type=ProcurementEventType.CONVERSATION_FAILED,
-                now=datetime.now(UTC),
+        # 只有首次联系和准备下一次发送前才重新核验来源；等待卖家回复时不重复爬取详情页。
+        requires_live_verification = (
+            task.task_status is ProcurementExecutionTaskStatus.PENDING_SOURCE_VERIFICATION
+            or queued_outbound is not None
+        )
+        if requires_live_verification:
+            verification = await self._verifier.verify(
+                VerificationTarget(item_id=task.source_item_id)
             )
-            return None
-        if task.task_status is ProcurementExecutionTaskStatus.PENDING_SOURCE_VERIFICATION:
-            self._repository.mark_source_verified(task.task_id, worker_id, datetime.now(UTC))
+            if verification.status is not LiveVerificationStatus.AVAILABLE:
+                self._record_verification_failure(task, worker_id, verification.status)
+                return None
+            expected_price = Decimal(task.expected_price_cny_minor) / Decimal(100)
+            if verification.current_price != expected_price:
+                self._repository.mark_terminal(
+                    task.task_id,
+                    worker_id,
+                    status=ProcurementExecutionTaskStatus.PRICE_CHANGED,
+                    reason_code="price_changed",
+                    event_type=ProcurementEventType.CONVERSATION_FAILED,
+                    now=datetime.now(UTC),
+                )
+                return None
+            if task.task_status is ProcurementExecutionTaskStatus.PENDING_SOURCE_VERIFICATION:
+                self._repository.mark_source_verified(task.task_id, worker_id, datetime.now(UTC))
 
         async with self._chat_factory.open(
             item_url=task.item_url,
@@ -274,32 +287,32 @@ class ProcurementConversationOrchestrator:
                     latest,
                     queued_outbound,
                 )
-                return datetime.now(UTC) + timedelta(seconds=self._seller_poll_seconds)
+                return datetime.now(UTC) + timedelta(seconds=_seller_poll_delay_seconds(0))
             reply_to_message_id: str | None = None
             inbound_created = False
-            is_initial_baseline = (
-                task.latest_outbound_message_id is None
-                and latest.fingerprint == task.conversation_baseline_fingerprint
-            )
-            if latest.direction == "seller":
-                if not is_initial_baseline:
-                    reply_to_message_id, inbound_created = (
-                        self._repository.record_inbound_message(
-                            task.task_id,
-                            worker_id,
-                            external_message_id=latest.fingerprint,
-                            content=latest.text,
-                            content_hash=hashlib.sha256(
-                                normalize_chat_text(latest.text).encode("utf-8")
-                            ).hexdigest(),
-                            observed_at=datetime.now(UTC),
-                        )
+            baseline = task.conversation_baseline_fingerprint
+            if not baseline:
+                raise ChatSafetyError("message_baseline_missing", "聊天消息基线缺失")
+            new_messages = await opened.client.read_messages_after(baseline)
+            for message in new_messages:
+                if message.direction == "seller":
+                    message_id, created = self._repository.record_inbound_message(
+                        task.task_id,
+                        worker_id,
+                        external_message_id=message.fingerprint,
+                        content=message.text,
+                        content_hash=hashlib.sha256(
+                            normalize_chat_text(message.text).encode("utf-8")
+                        ).hexdigest(),
+                        observed_at=datetime.now(UTC),
                     )
-            elif latest.direction not in {"self", "none"}:
-                raise ChatSafetyError(
-                    "message_direction_not_confirmed",
-                    "无法确认最新聊天消息方向",
-                )
+                    reply_to_message_id = message_id
+                    inbound_created = inbound_created or created
+                elif message.direction != "self":
+                    raise ChatSafetyError(
+                        "message_direction_not_confirmed",
+                        "无法确认新增聊天消息方向",
+                    )
 
             if inbound_created:
                 return None
@@ -308,12 +321,15 @@ class ProcurementConversationOrchestrator:
                 task.task_status is ProcurementExecutionTaskStatus.AWAITING_SELLER_REPLY
                 and not inbound_created
             ):
-                return datetime.now(UTC) + timedelta(seconds=self._seller_poll_seconds)
+                return datetime.now(UTC) + timedelta(
+                    seconds=_seller_poll_delay_seconds(task.seller_poll_attempt_count)
+                )
 
             seller_messages = self._repository.list_seller_messages(task.task_id)
             if any(
                 scan_draft_risks(message.content)
                 or PROMPT_INJECTION_PATTERN.search(message.content)
+                or SELLER_PURCHASE_ESCALATION_PATTERN.search(message.content)
                 for message in seller_messages
             ):
                 self._repository.mark_review_ready(
@@ -350,6 +366,7 @@ class ProcurementConversationOrchestrator:
                 output,
                 AutoSendContext(
                     enabled=self._auto_send_enabled,
+                    task_auto_send_authorized=task.auto_send_authorized,
                     session_status=ConversationSessionStatus.ACTIVE,
                     round_count=task.round_count,
                     max_auto_rounds=max_rounds,
@@ -450,13 +467,15 @@ class ProcurementConversationOrchestrator:
                 queued.message_id,
             ) as send_transaction:
                 try:
-                    await client.send_policy_allowed_draft(
+                    evidence = await client.send_policy_allowed_draft(
                         PolicyAllowedDraft(
                             text=queued.content,
                             policy_decision_id=queued.message_id,
                         ),
                         expected_latest_fingerprint=queued.expected_latest_fingerprint,
-                        auto_send_enabled=self._auto_send_enabled,
+                        auto_send_enabled=(
+                            self._auto_send_enabled and task.auto_send_authorized
+                        ),
                     )
                 except Exception:
                     send_transaction.mark_uncertain(
@@ -464,7 +483,10 @@ class ProcurementConversationOrchestrator:
                         datetime.now(UTC),
                     )
                 else:
-                    send_transaction.confirm_sent(datetime.now(UTC))
+                    send_transaction.confirm_sent(
+                        datetime.now(UTC),
+                        evidence.confirmed_message_fingerprint,
+                    )
         except ProcurementSendNotAllowedError:
             return
 
@@ -660,6 +682,18 @@ def _deadline_active(deadline: datetime, now: datetime) -> bool:
 
     normalized = deadline if deadline.tzinfo is not None else deadline.replace(tzinfo=UTC)
     return normalized > now
+
+
+def _seller_poll_delay_seconds(attempt_count: int) -> int:
+    """
+    按 2、5、10、15 分钟计算下一次卖家回复检查延迟。
+
+    输入已完成等待次数；返回秒数。第四次及以后固定十五分钟，最长总等待仍由任务的
+    24 小时 deadline 控制。
+    """
+
+    safe_index = max(0, min(int(attempt_count), len(SELLER_REPLY_BACKOFF_SECONDS) - 1))
+    return SELLER_REPLY_BACKOFF_SECONDS[safe_index]
 
 
 def _coarse_chat_reason(adapter_code: str) -> str:

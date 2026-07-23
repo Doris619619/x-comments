@@ -9,13 +9,15 @@ import secrets
 from typing import NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.repositories.procurement import ProcurementRepository
 from app.schemas.procurement import (
+    ConversationMessageRead,
     ProcurementExecutionTaskRead,
+    ProcurementMessagePage,
     ProcurementTaskAccepted,
     ProcurementTaskCancel,
     ProcurementTaskCreate,
@@ -26,6 +28,7 @@ from app.services.procurement import (
     ProcurementIdempotencyConflictError,
     ProcurementInvalidStateError,
     ProcurementServiceError,
+    ProcurementSourceBusyError,
     ProcurementSourceItemNotFoundError,
     ProcurementSourcePriceChangedError,
     ProcurementSourceUnavailableError,
@@ -33,8 +36,38 @@ from app.services.procurement import (
     ProcurementTaskNotFoundError,
     ProcurementTaskResult,
 )
+from app.services.procurement_payload_safety import (
+    UnsafeProcurementPayloadError,
+    assert_procurement_payload_safe,
+)
 
 router = APIRouter(prefix="/api/v1/procurement-tasks", tags=["procurement"])
+
+
+def require_legacy_procurement_source_allowlist(
+    request: Request,
+    payload: ProcurementTaskCreate,
+) -> None:
+    """
+    对旧版 v1 任务保留静态商品白名单，避免升级后扩大旧调用方权限。
+
+    输入应用状态和严格任务；v2 直接返回，v1 白名单未配置抛出 503，商品未获批
+    抛出 403；无写入副作用。v2 由商城 Root/支付授权、服务令牌和来源快照共同约束。
+    """
+
+    if payload.contract_version == 2:
+        return
+    allowed: object = getattr(request.app.state, "procurement_source_item_allowlist", None)
+    if not isinstance(allowed, frozenset) or not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "procurement_allowlist_not_configured"},
+        )
+    if payload.source.item_id not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "source_item_not_allowlisted"},
+        )
 
 
 def require_procurement_api_token(
@@ -91,6 +124,11 @@ def to_task_read(result: ProcurementTaskResult) -> ProcurementExecutionTaskRead:
     return ProcurementExecutionTaskRead(
         task_id=task.task_id,
         session_id=result.conversation.session_id,
+        contract_version=task.contract_version,
+        execution_mode=task.execution_mode,
+        auto_send_authorized=task.auto_send_authorized,
+        authorized_at=task.authorized_at,
+        authorization_source=task.authorization_source,
         source_item_id=task.source_item_id,
         expected_title=task.expected_title,
         expected_price_cny_minor=task.expected_price_cny_minor,
@@ -126,6 +164,7 @@ def raise_procurement_http_error(error: ProcurementServiceError) -> NoReturn:
             ProcurementTaskConflictError,
             ProcurementSourceUnavailableError,
             ProcurementSourcePriceChangedError,
+            ProcurementSourceBusyError,
             ProcurementInvalidStateError,
         ),
     ):
@@ -143,6 +182,7 @@ def raise_procurement_http_error(error: ProcurementServiceError) -> NoReturn:
 @router.post("", response_model=ProcurementTaskAccepted, status_code=status.HTTP_202_ACCEPTED)
 def create_procurement_task(
     payload: ProcurementTaskCreate,
+    request: Request,
     idempotency_key: str = Header(
         alias="Idempotency-Key",
         min_length=16,
@@ -158,11 +198,20 @@ def create_procurement_task(
     输入严格请求、幂等键和认证；成功返回 202；冲突、缺失或价格变化映射为明确错误。
     """
 
+    require_legacy_procurement_source_allowlist(request, payload)
+    try:
+        assert_procurement_payload_safe(payload)
+    except UnsafeProcurementPayloadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": exc.code},
+        ) from exc
     try:
         result = service.create(payload, idempotency_key)
     except ProcurementServiceError as exc:
         raise_procurement_http_error(exc)
     return ProcurementTaskAccepted(
+        contract_version=payload.contract_version,
         task_id=result.task.task_id,
         session_id=result.conversation.session_id,
         status=result.task.status,
@@ -188,6 +237,36 @@ def get_procurement_task(
     except ProcurementServiceError as exc:
         raise_procurement_http_error(exc)
     return to_task_read(result)
+
+
+@router.get("/{task_id}/messages", response_model=ProcurementMessagePage)
+def get_procurement_messages(
+    task_id: UUID,
+    after_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    _authorized: None = Depends(require_procurement_api_token),
+    service: ProcurementExecutionService = Depends(get_procurement_service),
+) -> ProcurementMessagePage:
+    """
+    增量返回指定采购任务的完整卖家回复和 AI 草稿。
+
+    输入任务、序号游标、页大小和服务端令牌；正文只返回给内部调用方，不执行链接或 HTML。
+    """
+
+    try:
+        rows, has_more = service.list_messages(
+            str(task_id),
+            after_seq=after_seq,
+            limit=limit,
+        )
+    except ProcurementServiceError as exc:
+        raise_procurement_http_error(exc)
+    messages = [ConversationMessageRead.model_validate(row) for row in rows]
+    return ProcurementMessagePage(
+        messages=messages,
+        next_seq=messages[-1].seq if messages else after_seq,
+        has_more=has_more,
+    )
 
 
 @router.post("/{task_id}/cancel", response_model=ProcurementExecutionTaskRead)

@@ -54,6 +54,7 @@ def append_procurement_event(
     conversation.event_seq += 1
     event_id = str(uuid4())
     event = ProcurementEvent(
+        contract_version=task.contract_version,
         event_id=event_id,
         event_seq=conversation.event_seq,
         event_type=event_type,

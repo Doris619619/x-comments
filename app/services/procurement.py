@@ -14,6 +14,7 @@ from typing import Protocol
 
 from app.models.catalog_sync import CatalogAvailability
 from app.models.procurement import (
+    ConversationMessage,
     ConversationSession,
     ProcurementExecutionTask,
     ProcurementExecutionTaskStatus,
@@ -54,6 +55,16 @@ class ProcurementTaskConflictError(ProcurementServiceError):
     """
 
     code = "task_id_conflict"
+
+
+class ProcurementSourceBusyError(ProcurementServiceError):
+    """
+    表示同一闲鱼商品已有未结束的采购或 Canary 对话。
+
+    API 映射为 409；此错误不会覆盖或并行创建第二个活动会话。
+    """
+
+    code = "source_item_has_active_procurement"
 
 
 class ProcurementSourceItemNotFoundError(ProcurementServiceError):
@@ -132,6 +143,12 @@ class ProcurementStore(Protocol):
     def get_by_idempotency_key(self, key: str) -> ProcurementExecutionTask | None:
         """按幂等键返回执行任务或 None；无写入副作用。"""
 
+    def get_active_by_source_item_id(
+        self,
+        source_item_id: str,
+    ) -> ProcurementExecutionTask | None:
+        """返回同一来源商品的活动任务或 None；无写入副作用。"""
+
     def get_session_by_task_id(self, task_id: str) -> ConversationSession | None:
         """返回任务唯一会话或 None；无写入副作用。"""
 
@@ -139,6 +156,15 @@ class ProcurementStore(Protocol):
         self, command: NewProcurementExecutionTask
     ) -> tuple[ProcurementExecutionTask, ConversationSession]:
         """原子创建执行任务与会话；冲突时抛出明确异常。"""
+
+    def list_messages(
+        self,
+        task_id: str,
+        *,
+        after_seq: int,
+        limit: int,
+    ) -> tuple[list[ConversationMessage], bool]:
+        """按序返回任务消息页和更多标志；无写入副作用。"""
 
     def cancel(
         self,
@@ -211,6 +237,8 @@ class ProcurementExecutionService:
         task_id = str(payload.task_id)
         if self.repository.get_by_task_id(task_id) is not None:
             raise ProcurementTaskConflictError("task_id 已存在")
+        if self.repository.get_active_by_source_item_id(payload.source.item_id) is not None:
+            raise ProcurementSourceBusyError("同一来源商品已有活动采购任务")
 
         snapshot = self.repository.get_source_snapshot(payload.source.item_id)
         if snapshot is None:
@@ -219,6 +247,11 @@ class ProcurementExecutionService:
 
         command = NewProcurementExecutionTask(
             task_id=task_id,
+            contract_version=payload.contract_version,
+            execution_mode=payload.execution_mode,
+            auto_send_authorized=payload.auto_send_authorized,
+            authorized_at=payload.authorized_at,
+            authorization_source=payload.authorization_source,
             source_item_id=payload.source.item_id,
             expected_title=payload.expected_listing.title,
             expected_price_cny_minor=payload.expected_listing.price_cny_minor,
@@ -238,6 +271,23 @@ class ProcurementExecutionService:
                 return self._resolve_idempotent_replay(concurrent, body_hash)
             raise ProcurementTaskConflictError("task_id 已存在") from None
         return ProcurementTaskResult(task=task, conversation=conversation)
+
+    def list_messages(
+        self,
+        task_id: str,
+        *,
+        after_seq: int,
+        limit: int,
+    ) -> tuple[list[ConversationMessage], bool]:
+        """
+        读取任务完整会话的增量消息页。
+
+        输入任务、游标和上限；不存在抛出 404 业务错误；返回有序消息及更多标志。
+        """
+
+        if self.repository.get_by_task_id(task_id) is None:
+            raise ProcurementTaskNotFoundError("采购任务不存在")
+        return self.repository.list_messages(task_id, after_seq=after_seq, limit=limit)
 
     def get(self, task_id: str) -> ProcurementTaskResult:
         """
@@ -271,6 +321,7 @@ class ProcurementExecutionService:
             ProcurementExecutionTaskStatus.SELLER_RISK,
             ProcurementExecutionTaskStatus.VERIFICATION_TIMEOUT,
             ProcurementExecutionTaskStatus.PROCUREMENT_FAILED,
+            ProcurementExecutionTaskStatus.CANARY_COMPLETED,
         }
         if result.task.status in terminal_states:
             raise ProcurementInvalidStateError("当前采购任务状态不允许取消")
