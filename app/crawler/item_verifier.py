@@ -10,7 +10,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from playwright.async_api import BrowserContext, Page, Response, async_playwright
+from playwright._impl._errors import TargetClosedError
+from playwright.async_api import Browser, BrowserContext, Page, Response, async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.core.config import Settings
@@ -36,6 +37,36 @@ PRICE_TEXT_PATTERN = re.compile(
 )
 DETAIL_PRICE_WAIT_MAX_MILLISECONDS = 8_000
 DETAIL_PRICE_WAIT_RESERVE_MILLISECONDS = 2_000
+
+
+async def _close_page_after_verification(page: Page) -> None:
+    """
+    关闭单次核验页面，但不让“目标已经关闭”的清理竞态覆盖已得到的核验结果。
+
+    输入 Playwright Page；无返回；只忽略清理阶段的 ``TargetClosedError``，其他关闭异常继续
+    向上抛出。副作用仅为关闭当前临时页面，不导航、不重试也不读取页面内容。
+    """
+
+    try:
+        await page.close()
+    except TargetClosedError:
+        # 页面已由浏览器或站点关闭时，重复 close 没有新的安全语义；业务阶段的同类异常不在此吞掉。
+        return
+
+
+async def _close_browser_after_verification(browser: Browser) -> None:
+    """
+    关闭单次核验浏览器，但不让已断开的目标关闭异常覆盖业务阶段结果。
+
+    输入具有异步 ``close`` 方法的 Playwright Browser；无返回；只忽略清理阶段的
+    ``TargetClosedError``，其他异常继续向上抛出。副作用仅为释放本次临时浏览器。
+    """
+
+    try:
+        await browser.close()
+    except TargetClosedError:
+        # 浏览器进程已经退出时无需再次解释为商品核验失败；导航阶段异常仍由 verify 失败关闭。
+        return
 
 
 def parse_single_price_text(value: str) -> Decimal | None:
@@ -137,6 +168,12 @@ class XianyuItemVerifier:
                 current_price=None,
                 reason_code="verification_timeout",
             )
+        except TargetClosedError:
+            return LiveVerificationResult(
+                status=LiveVerificationStatus.UNKNOWN,
+                current_price=None,
+                reason_code="verification_target_closed",
+            )
         except Exception:
             return LiveVerificationResult(
                 status=LiveVerificationStatus.UNKNOWN,
@@ -171,7 +208,7 @@ class XianyuItemVerifier:
                 context = await browser.new_context(storage_state=str(state_path))
                 return await self._verify_in_context(context, target)
             finally:
-                await browser.close()
+                await _close_browser_after_verification(browser)
 
     async def _verify_in_context(
         self, context: BrowserContext, target: VerificationTarget
@@ -257,7 +294,7 @@ class XianyuItemVerifier:
                 reason_code="listing_available",
             )
         finally:
-            await page.close()
+            await _close_page_after_verification(page)
 
     async def _wait_for_primary_price(self, page: Page) -> None:
         """
