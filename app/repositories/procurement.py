@@ -216,8 +216,13 @@ class ProcurementRepository:
             account_key=None,
             status=ConversationSessionStatus.PENDING_OPEN,
         )
-        self.session.add_all((task, conversation))
         try:
+            # PostgreSQL 必须先看到父任务，随后才能写入引用 task_id 的会话。
+            # 不依赖 SQLAlchemy 对两个无 relationship ORM 对象的隐式排序，避免生产环境
+            # 把 conversation_sessions 提前 INSERT 后触发外键失败。
+            self.session.add(task)
+            self.session.flush()
+            self.session.add(conversation)
             self.session.flush()
             append_procurement_event(
                 self.session,

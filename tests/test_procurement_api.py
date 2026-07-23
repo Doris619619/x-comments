@@ -12,7 +12,7 @@ from typing import cast
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models.catalog_keyword import CatalogKeyword
@@ -279,6 +279,40 @@ def test_create_returns_202_and_persists_server_side_source_snapshot(
         assert len(task.request_body_hash) == 64
         assert conversation.item_url == item_url
         assert conversation.account_key is None
+
+
+def test_create_flushes_parent_task_before_foreign_key_conversation(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    """
+    验证开启真实外键约束后，采购父任务会先于聊天会话写入。
+
+    输入隔离客户端和独立 SQLite 连接；返回无；若再次依赖 ORM 隐式排序，
+    创建接口会触发外键失败而使断言失败，不访问网络或真实闲鱼账号。
+    """
+
+    with session_factory() as session:
+        session.execute(text("PRAGMA foreign_keys=ON"))
+    seed_active_catalog_item(session_factory, item_id="81007")
+    payload = procurement_payload(item_id="81007", contract_version=2)
+    response = client.post(
+        "/api/v1/procurement-tasks",
+        json=payload,
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-parent-before-session",
+        },
+    )
+
+    assert response.status_code == 202
+    with session_factory() as session:
+        task_id = str(payload["task_id"])
+        assert session.get(ProcurementExecutionTask, task_id) is not None
+        assert session.scalar(
+            select(func.count())
+            .select_from(ConversationSession)
+            .where(ConversationSession.task_id == task_id)
+        ) == 1
 
 
 def test_create_is_idempotent_and_conflicting_body_returns_409(

@@ -95,7 +95,9 @@ HTTP 请求
 同键不同正文返回 409。首次创建必须能在 `items` 找到商品，且最新发布 Catalog 快照为 `active`、
 币种为 CNY、价格与商城整数分快照完全一致。通过后在同一短事务中创建
 `ProcurementExecutionTask` 与 `ConversationSession`。商品 URL 不接受调用方输入，只从
-`Item.item_url` 复制到内部会话；数据库部分唯一索引同时阻止同一商品存在两个活动采购任务。
+`Item.item_url` 复制到内部会话；仓储会先 flush 父任务，再 flush 带外键的会话，避免不同数据库
+对无 ORM relationship 对象采用不同插入顺序。测试 SQLite 显式开启外键约束，确保该 PostgreSQL
+边界持续回归。数据库部分唯一索引同时阻止同一商品存在两个活动采购任务。
 
 入站消息通过外部消息 ID、出站草稿通过 SHA-256 幂等键去重；状态变化与商城回调事件在同一数据库
 事务中写入审计和 `ProcurementOutbox`。投递器按每个任务的 `event_seq` 串行回调，任何同任务未交付
