@@ -8,10 +8,16 @@
 
 BODY_SELECTOR = "body"
 
-# 闲鱼会调整动态 CSS 类和可见文案；身份参数才是稳定安全边界。只接受同时携带商品与
-# 对端用户参数的可见 IM 链接，并由调用方继续执行唯一性、商品、卖家和买家账号校验。
-# 禁止回退到不带完整绑定参数的侧栏消息入口或全页任意 /im 链接。
-OPEN_CHAT_SELECTOR = "a[href*='/im?'][href*='itemId='][href*='peerUserId=']"
+# 闲鱼会调整动态 CSS 类；身份参数与用户可见动作语义共同构成稳定边界。只接受同时
+# 携带商品/对端用户参数且文案为主商品动作“聊一聊”或“我想要”的链接。侧栏“消息”
+# 即使携带相同参数也必须排除，调用方还会继续核对唯一性、商品、卖家和买家账号。
+BOUND_CHAT_LINK_SELECTOR = "a[href*='/im?'][href*='itemId='][href*='peerUserId=']"
+OPEN_CHAT_SELECTOR = ", ".join(
+    (
+        f"{BOUND_CHAT_LINK_SELECTOR}:has-text('聊一聊')",
+        f"{BOUND_CHAT_LINK_SELECTOR}:has-text('我想要')",
+    )
+)
 CHAT_ENTRY_WAIT_MILLISECONDS = 8_000
 CHAT_READY_WAIT_MILLISECONDS = 8_000
 CHAT_PANEL_SELECTOR = "main[class*='chat-main--']"
