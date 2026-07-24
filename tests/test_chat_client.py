@@ -56,6 +56,7 @@ class FakeNode:
     click_count: int = 0
     typed_texts: list[str] = field(default_factory=list)
     on_click: Callable[[], None] | None = None
+    attribute_read_overrides: dict[str, list[str | None]] = field(default_factory=dict)
 
 
 class FakeLocator:
@@ -138,7 +139,11 @@ class FakeLocator:
         参数为属性名；返回字符串或 ``None``；节点不唯一时抛出 ``AssertionError``。
         """
 
-        return self._single().attributes.get(name)
+        node = self._single()
+        overrides = node.attribute_read_overrides.get(name)
+        if overrides:
+            return overrides.pop(0)
+        return node.attributes.get(name)
 
     async def evaluate(self, expression: str) -> str:
         """
@@ -634,16 +639,63 @@ async def test_discovers_seller_and_accepts_hashed_account_binding() -> None:
     ]
 
 
-def test_open_chat_selector_excludes_generic_sidebar_message_link() -> None:
+def test_open_chat_selector_requires_complete_item_and_seller_binding() -> None:
     """
-    验证聊天入口同时限定主商品 want 控件和完整 IM 身份参数。
+    验证聊天入口依赖完整商品/卖家身份参数，不依赖会漂移的 CSS 类和文案。
 
     无输入；断言失败抛出 AssertionError；只检查集中选择器字符串，不访问页面或网络。
     """
 
-    assert "want--" in OPEN_CHAT_SELECTOR
+    assert "want--" not in OPEN_CHAT_SELECTOR
     assert "itemId=" in OPEN_CHAT_SELECTOR
     assert "peerUserId=" in OPEN_CHAT_SELECTOR
+
+
+@pytest.mark.asyncio
+async def test_discovers_binding_when_chat_entry_label_changes() -> None:
+    """
+    验证闲鱼仅调整入口文案时，完整商品/卖家参数仍可建立安全绑定。
+
+    无输入；只修改离线节点文案并读取 URL 与账号 Cookie；不点击、不联网、不发送。
+    """
+
+    environment = make_chat_environment()
+    environment.open_node.text = "消息"
+    expected_fingerprint = hashlib.sha256(b"account-300").hexdigest()
+
+    binding = await discover_chat_binding(
+        cast(Page, environment.page),
+        source_item_id="item-100",
+        expected_account_id=expected_fingerprint,
+        account_guard=cast(AccountAccessGuard, FakeAccountGuard()),
+    )
+
+    assert binding.seller_id == "seller-200"
+    assert environment.open_node.click_count == 0
+
+
+@pytest.mark.asyncio
+async def test_discovers_binding_after_transient_href_render_gap() -> None:
+    """
+    验证入口刚显示但 href 尚未就绪时，只读稳定化窗口可读取后续完整身份 URL。
+
+    无输入；只模拟第一次属性读取为空；不点击、不联网、不发送。
+    """
+
+    environment = make_chat_environment()
+    expected_href = environment.open_node.attributes["href"]
+    environment.open_node.attribute_read_overrides["href"] = [None, expected_href]
+    expected_fingerprint = hashlib.sha256(b"account-300").hexdigest()
+
+    binding = await discover_chat_binding(
+        cast(Page, environment.page),
+        source_item_id="item-100",
+        expected_account_id=expected_fingerprint,
+        account_guard=cast(AccountAccessGuard, FakeAccountGuard()),
+    )
+
+    assert binding.seller_id == "seller-200"
+    assert environment.open_node.click_count == 0
 
 
 def test_message_fingerprint_is_stable_after_text_normalization() -> None:

@@ -1,5 +1,5 @@
 """
-本文件集中保存经 2026-07-23 生产登录态只读标定确认的闲鱼聊天选择器。
+本文件集中保存经 2026-07-24 生产登录态只读标定确认的闲鱼聊天选择器。
 
 它属于 crawler 页面适配模块，只描述商品聊天入口、聊天主体、输入、发送和消息节点。
 选择器优先使用 URL 参数、元素语义和稳定类名前缀，不保存哈希后缀、账号、卖家、聊天正文
@@ -8,11 +8,10 @@
 
 BODY_SELECTOR = "body"
 
-# 商品页同时存在侧栏“消息”和主商品“聊一聊”两个 IM 链接。只有主商品 want 控件且
-# 同时携带商品与对端用户参数时才可作为受控入口，禁止回退到全页任意 /im 链接。
-OPEN_CHAT_SELECTOR = (
-    "a[class*='want--'][href*='/im?'][href*='itemId='][href*='peerUserId=']"
-)
+# 闲鱼会调整动态 CSS 类和可见文案；身份参数才是稳定安全边界。只接受同时携带商品与
+# 对端用户参数的可见 IM 链接，并由调用方继续执行唯一性、商品、卖家和买家账号校验。
+# 禁止回退到不带完整绑定参数的侧栏消息入口或全页任意 /im 链接。
+OPEN_CHAT_SELECTOR = "a[href*='/im?'][href*='itemId='][href*='peerUserId=']"
 CHAT_ENTRY_WAIT_MILLISECONDS = 8_000
 CHAT_READY_WAIT_MILLISECONDS = 8_000
 CHAT_PANEL_SELECTOR = "main[class*='chat-main--']"
