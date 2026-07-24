@@ -17,6 +17,7 @@ from playwright.async_api import Page
 from app.crawler.chat_client import (
     ChatBinding,
     ChatSafetyError,
+    ChatSendUncertainError,
     PolicyAllowedDraft,
     XianyuChatClient,
     build_message_fingerprint,
@@ -193,6 +194,52 @@ class FakeLocator:
         if node.on_click is not None:
             node.on_click()
 
+    async def scroll_into_view_if_needed(self, *, timeout: float | None = None) -> None:
+        """
+        模拟把唯一节点滚动到可视区域。
+
+        参数为可选超时；无返回；离线节点始终位于可视区域，不产生外部副作用。
+        """
+
+        del timeout
+        self._single()
+
+    async def bounding_box(self) -> dict[str, float]:
+        """
+        返回唯一节点的稳定离线按钮边界。
+
+        无输入；返回固定坐标与尺寸；节点不唯一时抛出 ``AssertionError``。
+        """
+
+        self._single()
+        return {"x": 100.0, "y": 40.0, "width": 80.0, "height": 32.0}
+
+
+@dataclass
+class FakeRequest:
+    """
+    保存一次离线发送请求的最小 Playwright 兼容字段。
+
+    对象只服务单元测试，不包含 Cookie、凭据或真实网络连接。
+    """
+
+    url: str
+    method: str
+    resource_type: str
+    post_data: str | None
+
+
+@dataclass
+class FakeResponse:
+    """
+    保存离线请求对应的 HTTP 状态。
+
+    对象不保存响应正文或响应头，也不会发起网络访问。
+    """
+
+    request: FakeRequest
+    status: int
+
 
 class FakeContext:
     """
@@ -206,12 +253,102 @@ class FakeContext:
 
         self.account_id = account_id
         self.pages: list[FakePage] = []
+        self.handlers: dict[str, list[Callable[[object], None]]] = {}
 
     async def cookies(self, *urls: str) -> list[dict[str, str]]:
         """返回一个离线 ``tracknick`` Cookie；URL 参数仅用于兼容生产接口。"""
 
         del urls
         return [{"name": "tracknick", "value": self.account_id}]
+
+    def on(self, event: str, callback: Callable[[object], None]) -> None:
+        """
+        注册离线上下文事件回调。
+
+        输入事件名和回调；无返回；副作用仅保存内存引用。
+        """
+
+        self.handlers.setdefault(event, []).append(callback)
+
+    def emit(self, event: str, payload: object) -> None:
+        """
+        同步触发已注册的离线上下文事件。
+
+        输入事件名和载荷；无返回；只执行测试回调，不访问网络。
+        """
+
+        for callback in self.handlers.get(event, []):
+            callback(payload)
+
+
+class FakeMouse:
+    """
+    模拟 Playwright 鼠标轨迹与唯一发送按钮的按下松开。
+
+    它记录轨迹并在 mouse.up 时触发一次离线请求和按钮回调，不包含真实页面操作。
+    """
+
+    def __init__(self, page: "FakePage") -> None:
+        """
+        保存所属页面并初始化可观测计数。
+
+        输入离线页面；无返回；不立即触发任何按钮或网络事件。
+        """
+
+        self.page = page
+        self.moves: list[tuple[float, float, int]] = []
+        self.down_count = 0
+        self.up_count = 0
+
+    async def move(self, x: float, y: float, *, steps: int) -> None:
+        """
+        记录一次分步鼠标移动。
+
+        输入坐标和步数；无返回；副作用仅写内存轨迹。
+        """
+
+        self.moves.append((x, y, steps))
+
+    async def down(self) -> None:
+        """
+        记录鼠标按下。
+
+        无输入和返回；只增加离线计数。
+        """
+
+        self.down_count += 1
+
+    async def up(self) -> None:
+        """
+        记录鼠标松开并模拟发送按钮产生的网络请求和 DOM 回显。
+
+        无输入和返回；所有副作用均局限于 Fake Page 内存。
+        """
+
+        self.up_count += 1
+        send_nodes = self.page.nodes_by_selector[CHAT_SEND_SELECTOR]
+        if len(send_nodes) != 1:
+            raise AssertionError("离线鼠标发送需要唯一按钮")
+        send_node = send_nodes[0]
+        send_node.click_count += 1
+        if self.page.observe_send_request:
+            request = FakeRequest(
+                url="https://h5api.m.goofish.com/chat/send",
+                method="POST",
+                resource_type="fetch",
+                post_data=(
+                    '{"content":"'
+                    f"{self.page.nodes_by_selector[CHAT_INPUT_SELECTOR][0].filled_text}"
+                    '"}'
+                ),
+            )
+            self.page.context.emit("request", request)
+            self.page.context.emit(
+                "response",
+                FakeResponse(request=request, status=self.page.send_response_status),
+            )
+        if send_node.on_click is not None:
+            send_node.on_click()
 
 
 class FakePage:
@@ -227,6 +364,8 @@ class FakePage:
         nodes_by_selector: dict[str, list[FakeNode]],
         *,
         account_id: str = "account-300",
+        observe_send_request: bool = True,
+        send_response_status: int = 200,
     ) -> None:
         """
         保存固定 URL 与 selector 映射。
@@ -239,6 +378,10 @@ class FakePage:
         self.context = FakeContext(account_id)
         self.context.pages.append(self)
         self.wait_for_selector_calls: list[tuple[str, str, float]] = []
+        self.handlers: dict[str, list[Callable[[object], None]]] = {}
+        self.observe_send_request = observe_send_request
+        self.send_response_status = send_response_status
+        self.mouse = FakeMouse(self)
 
     def locator(self, selector: str) -> FakeLocator:
         """
@@ -283,6 +426,15 @@ class FakePage:
         """消费离线页面加载等待参数，不阻塞且不访问网络。"""
 
         del state, timeout
+
+    def on(self, event: str, callback: Callable[[object], None]) -> None:
+        """
+        注册离线页面事件监听器。
+
+        输入事件名与回调；无返回；当前测试不主动建立 WebSocket。
+        """
+
+        self.handlers.setdefault(event, []).append(callback)
 
 
 class FakeAccountGuard:
@@ -334,11 +486,16 @@ class FakeChatEnvironment:
     own_messages: list[FakeNode]
 
 
-def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
+def make_chat_environment(
+    *,
+    confirm_send: bool = True,
+    observe_send_request: bool = True,
+) -> FakeChatEnvironment:
     """
     创建绑定商品 ``item-100`` 的完整离线聊天 DOM。
 
-    参数控制发送按钮点击后是否追加本人消息；返回可变测试环境；不启动浏览器或访问网络。
+    参数控制发送按钮点击后是否追加本人消息及产生匹配请求；返回可变测试环境；
+    不启动浏览器或访问网络。
     """
 
     input_node = FakeNode()
@@ -389,7 +546,11 @@ def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
         own_messages.insert(0, sent)
 
     send_node.on_click = append_sent_message
-    page = FakePage("https://www.goofish.com/item?id=item-100", nodes_by_selector)
+    page = FakePage(
+        "https://www.goofish.com/item?id=item-100",
+        nodes_by_selector,
+        observe_send_request=observe_send_request,
+    )
     open_node.text = "聊一聊"
     open_node.attributes["href"] = (
         "https://www.goofish.com/im?itemId=item-100&peerUserId=seller-200"
@@ -555,12 +716,20 @@ async def test_send_holds_guard_rechecks_message_and_confirms_own_text() -> None
     assert environment.input_node.filled_text == "请问近期可以发货吗？"
     assert environment.input_node.typed_texts == ["请问近期可以发货吗？"]
     assert environment.send_node.click_count == 1
+    assert environment.page.mouse.down_count == 1
+    assert environment.page.mouse.up_count == 1
+    assert environment.page.mouse.moves == [(140.0, 56.0, 8)]
     assert environment.open_node.click_count == 0
     assert len(environment.own_messages) == 1
     assert evidence.source_item_id == "item-100"
     assert evidence.policy_decision_id == "policy-2"
     assert len(evidence.draft_sha256) == 64
     assert len(evidence.confirmed_message_fingerprint) == 64
+    assert evidence.request_evidence.request_observed is True
+    assert evidence.request_evidence.transport == "http"
+    assert len(evidence.request_evidence.endpoint_sha256 or "") == 64
+    assert evidence.request_evidence.response_observed is True
+    assert evidence.request_evidence.response_status == 200
 
 
 @pytest.mark.asyncio
@@ -707,7 +876,7 @@ async def test_missing_send_confirmation_never_retries_submit() -> None:
     client = make_client(environment, guard)
     latest = await client.read_latest_message()
 
-    with pytest.raises(ChatSafetyError) as caught:
+    with pytest.raises(ChatSendUncertainError) as caught:
         await client.send_policy_allowed_draft(
             PolicyAllowedDraft("请问还在吗？", "policy-5"),
             expected_latest_fingerprint=latest.fingerprint,
@@ -715,9 +884,35 @@ async def test_missing_send_confirmation_never_retries_submit() -> None:
         )
 
     assert caught.value.code == "send_confirmation_missing"
+    assert caught.value.request_evidence.request_observed is True
     assert environment.input_node.typed_texts == ["请问还在吗？"]
     assert environment.send_node.click_count == 1
     assert environment.open_node.click_count == 0
+
+
+@pytest.mark.asyncio
+async def test_visible_message_without_matching_request_is_uncertain_and_never_retries() -> None:
+    """
+    验证页面即使出现本人消息，缺少匹配网络请求证据也不能确认发送成功。
+
+    无输入；断言失败抛出 ``AssertionError``；唯一鼠标提交只在 Fake Page 内存执行一次。
+    """
+
+    environment = make_chat_environment(observe_send_request=False)
+    client = make_client(environment, FakeAccountGuard())
+    latest = await client.read_latest_message()
+
+    with pytest.raises(ChatSendUncertainError) as caught:
+        await client.send_policy_allowed_draft(
+            PolicyAllowedDraft("请问还在吗？", "policy-no-request"),
+            expected_latest_fingerprint=latest.fingerprint,
+            auto_send_enabled=True,
+        )
+
+    assert caught.value.code == "send_request_not_observed"
+    assert caught.value.request_evidence.request_observed is False
+    assert environment.send_node.click_count == 1
+    assert environment.page.mouse.up_count == 1
 
 
 @pytest.mark.asyncio

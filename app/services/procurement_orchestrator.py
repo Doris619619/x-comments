@@ -23,7 +23,9 @@ from app.ai.base import (
 from app.crawler.chat_client import (
     ChatMessageSnapshot,
     ChatSafetyError,
+    ChatSendUncertainError,
     PolicyAllowedDraft,
+    SendRequestEvidence,
     item_url_matches_binding,
     normalize_chat_text,
 )
@@ -58,6 +60,34 @@ SELLER_PURCHASE_ESCALATION_PATTERN = re.compile(
     r"(?:现在拍吗|要不要拍|可以拍下|直接拍|什么时候付款|等你付款|给你改价)",
     re.I,
 )
+
+
+def _redacted_send_request_evidence(
+    evidence: SendRequestEvidence | None,
+) -> dict[str, object]:
+    """
+    将页面适配器证据限制为可进入审计和回调的固定安全字段。
+
+    输入可选网络证据；返回不含 URL、正文、Cookie、账号或卖家信息的字典；无外部副作用。
+    """
+
+    if evidence is None:
+        return {
+            "request_observed": False,
+            "transport": None,
+            "endpoint_sha256": None,
+            "method": None,
+            "response_observed": False,
+            "response_status": None,
+        }
+    return {
+        "request_observed": evidence.request_observed,
+        "transport": evidence.transport,
+        "endpoint_sha256": evidence.endpoint_sha256,
+        "method": evidence.method,
+        "response_observed": evidence.response_observed,
+        "response_status": evidence.response_status,
+    }
 
 
 class ProcurementConversationOrchestrator:
@@ -460,15 +490,27 @@ class ProcurementConversationOrchestrator:
                             self._auto_send_enabled and task.auto_send_authorized
                         ),
                     )
+                except ChatSendUncertainError as exc:
+                    send_transaction.mark_uncertain(
+                        exc.code,
+                        datetime.now(UTC),
+                        request_evidence=_redacted_send_request_evidence(
+                            exc.request_evidence
+                        ),
+                    )
                 except Exception:
                     send_transaction.mark_uncertain(
                         "send_result_uncertain",
                         datetime.now(UTC),
+                        request_evidence=_redacted_send_request_evidence(None),
                     )
                 else:
                     send_transaction.confirm_sent(
                         datetime.now(UTC),
                         evidence.confirmed_message_fingerprint,
+                        request_evidence=_redacted_send_request_evidence(
+                            evidence.request_evidence
+                        ),
                     )
         except ProcurementSendNotAllowedError:
             return

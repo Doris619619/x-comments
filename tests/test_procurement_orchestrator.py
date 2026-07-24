@@ -21,8 +21,10 @@ from app.crawler.chat_client import (
     ChatBinding,
     ChatMessageSnapshot,
     ChatSafetyError,
+    ChatSendUncertainError,
     PolicyAllowedDraft,
     SendEvidence,
+    SendRequestEvidence,
 )
 from app.crawler.chat_runtime import OpenedXianyuChat
 from app.models.item import Item
@@ -33,6 +35,7 @@ from app.models.procurement import (
     ConversationSenderRole,
     ConversationSession,
     ConversationSessionStatus,
+    ProcurementAuditLog,
     ProcurementAuthorizationSource,
     ProcurementExecutionMode,
     ProcurementExecutionTask,
@@ -174,7 +177,18 @@ class FakeChatClient:
         assert expected_latest_fingerprint == self.latest.fingerprint
         self.send_calls += 1
         if self.fail_send:
-            raise ChatSafetyError("send_confirmation_missing", "离线模拟发送结果不确定")
+            raise ChatSendUncertainError(
+                "send_confirmation_missing",
+                "离线模拟发送结果不确定",
+                SendRequestEvidence(
+                    request_observed=True,
+                    transport="http",
+                    endpoint_sha256="d" * 64,
+                    method="POST",
+                    response_observed=True,
+                    response_status=200,
+                ),
+            )
         self.latest = ChatMessageSnapshot(
             "confirmed-self-message",
             "self",
@@ -189,6 +203,14 @@ class FakeChatClient:
             policy_decision_id=draft.policy_decision_id,
             draft_sha256="b" * 64,
             confirmed_message_fingerprint="c" * 64,
+            request_evidence=SendRequestEvidence(
+                request_observed=True,
+                transport="http",
+                endpoint_sha256="d" * 64,
+                method="POST",
+                response_observed=True,
+                response_status=200,
+            ),
         )
 
 
@@ -423,6 +445,16 @@ async def test_success_waits_for_each_callback_then_sends_once(
         assert len(messages) == 1
         assert messages[0].status is ConversationMessageStatus.SENT
         assert messages[0].send_attempt_count == 1
+        sent_audit = db.scalar(
+            select(ProcurementAuditLog).where(
+                ProcurementAuditLog.action == "assistant_message_sent"
+            )
+        )
+        assert sent_audit is not None
+        assert sent_audit.metadata_redacted["request_observed"] is True
+        assert sent_audit.metadata_redacted["transport"] == "http"
+        assert sent_audit.metadata_redacted["endpoint_sha256"] == "d" * 64
+        assert "url" not in sent_audit.metadata_redacted
 
 
 @pytest.mark.asyncio
@@ -487,6 +519,14 @@ async def test_send_crash_window_never_retries_same_message(
         assert message.status is ConversationMessageStatus.SEND_FAILED
         assert message.send_attempt_count == 1
         assert client.send_calls == 1
+        uncertain_audit = db.scalar(
+            select(ProcurementAuditLog).where(
+                ProcurementAuditLog.action == "assistant_send_uncertain"
+            )
+        )
+        assert uncertain_audit is not None
+        assert uncertain_audit.metadata_redacted["request_observed"] is True
+        assert uncertain_audit.metadata_redacted["transport"] == "http"
 
 
 @pytest.mark.asyncio

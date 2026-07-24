@@ -169,18 +169,26 @@ class ProcurementSendTransaction:
         self._message = message
         self.finalized = False
 
-    def confirm_sent(self, now: datetime, confirmed_fingerprint: str) -> None:
+    def confirm_sent(
+        self,
+        now: datetime,
+        confirmed_fingerprint: str,
+        *,
+        request_evidence: dict[str, Any],
+    ) -> None:
         """
-        在页面出现本人同文消息证据后，于持锁事务中确认 sent。
+        在网络请求与页面本人同文消息均确认后，于持锁事务中确认 sent。
 
-        输入确认时间与页面消息指纹；无返回；更新消息、轮次、页面游标、审计和 Outbox，
-        但提交由上下文负责。
+        输入确认时间、页面消息指纹和脱敏网络事实；无返回；更新消息、轮次、页面游标、
+        审计和 Outbox，但提交由上下文负责。
         """
 
         if self.finalized:
             raise RuntimeError("发送事务已经最终化")
         if len(confirmed_fingerprint) != 64:
             raise RuntimeError("发送确认消息指纹无效")
+        if request_evidence.get("request_observed") is not True:
+            raise RuntimeError("缺少已发出网络请求证据")
         self._message.status = ConversationMessageStatus.SENT
         self._message.external_message_id = confirmed_fingerprint
         self._message.sent_at = now
@@ -204,7 +212,10 @@ class ProcurementSendTransaction:
             occurred_at=now,
             message_id=self._message.message_id,
             idempotency_suffix=self._message.idempotency_key,
-            metadata_redacted={"send_attempt_count": self._message.send_attempt_count},
+            metadata_redacted={
+                "send_attempt_count": self._message.send_attempt_count,
+                **request_evidence,
+            },
         )
         append_procurement_event(
             self._db,
@@ -216,15 +227,22 @@ class ProcurementSendTransaction:
             data={
                 "round_count": self._conversation.round_count,
                 "response_deadline_at": self._task.response_deadline_at.isoformat(),
+                "send_request_evidence": request_evidence,
             },
         )
         self.finalized = True
 
-    def mark_uncertain(self, reason_code: str, now: datetime) -> None:
+    def mark_uncertain(
+        self,
+        reason_code: str,
+        now: datetime,
+        *,
+        request_evidence: dict[str, Any],
+    ) -> None:
         """
         在页面发送结果无法确认时，于持锁事务中永久转人工审核。
 
-        输入稳定原因码和时间；无返回；不保存底层异常，不允许后续自动重试。
+        输入稳定原因码、时间与脱敏网络事实；无返回；不保存底层异常，不允许后续自动重试。
         """
 
         if self.finalized:
@@ -252,6 +270,10 @@ class ProcurementSendTransaction:
             message_id=self._message.message_id,
             reason_code=reason_code,
             idempotency_suffix=self._message.idempotency_key,
+            metadata_redacted={
+                "send_attempt_count": self._message.send_attempt_count,
+                **request_evidence,
+            },
         )
         append_procurement_event(
             self._db,
@@ -261,7 +283,10 @@ class ProcurementSendTransaction:
             now,
             message_id=self._message.message_id,
             reason_code=reason_code,
-            data={"policy_reason_codes": [reason_code]},
+            data={
+                "policy_reason_codes": [reason_code],
+                "send_request_evidence": request_evidence,
+            },
         )
         self.finalized = True
 
