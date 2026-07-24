@@ -186,31 +186,45 @@ def test_legacy_v1_create_rejects_source_item_outside_allowlist(client: TestClie
     assert response.json()["detail"]["code"] == "source_item_not_allowlisted"
 
 
-def test_v2_create_uses_task_authorization_instead_of_static_allowlist(
+def test_v2_create_requires_static_allowlist_and_task_authorization(
     client: TestClient,
     session_factory: sessionmaker[Session],
 ) -> None:
     """
-    验证 v2 可由商城逐任务授权，不要求每个商品预先写入服务器环境变量。
+    验证 v2 逐任务授权不能绕过服务器端单商品白名单。
 
-    输入隔离客户端和数据库；断言失败抛出 AssertionError；只创建测试任务，不运行聊天。
+    输入隔离客户端和数据库；先断言空白名单失败关闭，再配置同一商品并创建任务；
+    断言失败抛出 AssertionError；只写测试数据库，不运行聊天。
     """
 
     seed_active_catalog_item(session_factory)
     application = cast(FastAPI, client.app)
     application.state.procurement_source_item_allowlist = frozenset()
 
-    response = client.post(
+    rejected = client.post(
         "/api/v1/procurement-tasks",
         json=procurement_payload(contract_version=2),
         headers={
             **PROCUREMENT_HEADERS,
-            "Idempotency-Key": "procurement-v2-task-authorization",
+            "Idempotency-Key": "procurement-v2-empty-allowlist",
         },
     )
 
-    assert response.status_code == 202
-    assert response.json()["contract_version"] == 2
+    assert rejected.status_code == 503
+    assert rejected.json()["detail"]["code"] == "procurement_allowlist_not_configured"
+
+    application.state.procurement_source_item_allowlist = frozenset({"81001"})
+    accepted = client.post(
+        "/api/v1/procurement-tasks",
+        json=procurement_payload(contract_version=2),
+        headers={
+            **PROCUREMENT_HEADERS,
+            "Idempotency-Key": "procurement-v2-allowlisted",
+        },
+    )
+
+    assert accepted.status_code == 202
+    assert accepted.json()["contract_version"] == 2
 
 
 def test_create_rejects_sensitive_text_hidden_in_listing_title(client: TestClient) -> None:
@@ -308,11 +322,14 @@ def test_create_flushes_parent_task_before_foreign_key_conversation(
     with session_factory() as session:
         task_id = str(payload["task_id"])
         assert session.get(ProcurementExecutionTask, task_id) is not None
-        assert session.scalar(
-            select(func.count())
-            .select_from(ConversationSession)
-            .where(ConversationSession.task_id == task_id)
-        ) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ConversationSession)
+                .where(ConversationSession.task_id == task_id)
+            )
+            == 1
+        )
 
 
 def test_create_is_idempotent_and_conflicting_body_returns_409(
@@ -416,13 +433,13 @@ def test_create_rejects_missing_item_and_changed_price(
     assert task_count == 0
 
 
-def test_create_rejects_latest_published_snapshot_that_is_not_active(
+def test_create_accepts_curated_snapshot_regardless_of_catalog_availability(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
     """
-    验证最新发布快照不是 active 时返回 409，不以 Item 仍存在为由创建任务。
+    验证彦诗已筛选商品不会因目录 availability 标记为 off_shelf 而被采购对话拒绝。
 
-    输入客户端和会话工厂；断言失败抛出 AssertionError；副作用仅限测试数据库。
+    输入客户端和会话工厂；断言任务创建成功；副作用仅限测试数据库，不访问闲鱼或发送消息。
     """
 
     seed_active_catalog_item(session_factory, item_id="81005")
@@ -443,11 +460,11 @@ def test_create_rejects_latest_published_snapshot_that_is_not_active(
         headers={**PROCUREMENT_HEADERS, "Idempotency-Key": "procurement-inactive-test-0001"},
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "source_not_active"
+    assert response.status_code == 202
+    assert response.json()["status"] == "pending_source_verification"
     with session_factory() as session:
         task_count = session.scalar(select(func.count()).select_from(ProcurementExecutionTask))
-    assert task_count == 0
+    assert task_count == 1
 
 
 def test_create_accepts_curated_snapshot_that_is_only_suspected_missing(
@@ -460,6 +477,8 @@ def test_create_accepts_curated_snapshot_that_is_only_suspected_missing(
     """
 
     seed_active_catalog_item(session_factory, item_id="81008")
+    application = cast(FastAPI, client.app)
+    application.state.procurement_source_item_allowlist = frozenset({"81008"})
     with session_factory() as session:
         latest = session.scalar(
             select(CatalogChange)

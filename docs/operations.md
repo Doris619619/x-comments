@@ -4,9 +4,9 @@
 x-comments 使用 PostgreSQL，shopping 使用 MongoDB；shopping 只经 Docker 私有网络调用受 Bearer
 保护的 Catalog Sync API，绝不直连 PostgreSQL。
 
-兼容旧 v1 调用方时，可配置 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 为英文逗号分隔的闲鱼
-`item_id`；留空只会拒绝 v1，不会给 v2 增加权限。v2 Canary 由商城 Root 手工复输商品 ID 后逐任务
-授权。当前生产 `PROCUREMENT_CHAT_ENABLED=true` 用于受控草稿验收，
+`PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 必须配置为英文逗号分隔的获批闲鱼 `item_id`，v1 与 v2
+都失败关闭；v2 Canary 还必须由商城 Root 手工复输商品 ID 后逐任务授权。当前生产
+`PROCUREMENT_CHAT_ENABLED=true` 用于受控草稿验收，
 `PROCUREMENT_AUTO_SEND_ENABLED=false` 保持关闭。仅做一个白名单商品的低流量 Canary 时，
 也必须人工复核商品 ID 与商城任务级授权，
 且不得把客户资料、支付资料、Cookie 或账号密码写入环境变量。

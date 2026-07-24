@@ -38,12 +38,12 @@
 - 采购任务 API 的创建只使用本地 Item 与最新发布 Catalog 快照。彦诗筛选源不再在打开聊天前执行
   商品详情页实时核验；聊天编排会校对本地商品 ID、官方 URL 和 CNY 快照，并在页面上确认商品、
   卖家与买家账号绑定。草稿持久化、单次发送保护和事务 Outbox 已接入。
-- 兼容旧 v1 采购 API 仍要求 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST`；v2 则依靠商城逐任务授权，
-  不要求动态商品长期进入服务器静态白名单。两者都不能替代聊天商品、卖家、账号和风控绑定。标题
+- v1 与 v2 采购 API 都要求 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST`；v2 还依靠商城逐任务授权，
+  两层门禁必须同时成立。两者都不能替代聊天商品、卖家、账号和风控绑定。标题
   疑似夹带客户、联系方式、卡号或支付资料时返回 422，响应不回显命中文本。
 - 采购创建 API 只接受商品 ID，不接受调用方 URL；仍须依赖本地目录 URL 的采集正确性。最新发布
-  快照为 `active` 或 `suspected_missing`、CNY 且价格一致时可以创建任务；这表示信任彦诗筛选源，
-  不表示实时库存确认。
+  快照只需存在 CNY 价格且与商城一致；`active`、`suspected_missing`、`off_shelf` 等目录状态不会
+  阻断任务。这表示信任彦诗选品，不表示实时库存确认；真实可用性由后续卖家对话和人工采购判断。
 - `PROCUREMENT_API_TOKEN` 必须独立配置且至少 32 字符；当前只支持一个有效值，不替代生产网络隔离、
   Secret 轮换与来源限制。
 - `PROCUREMENT_CHAT_ENABLED` 默认关闭，但当前生产已为草稿验收开启；`PROCUREMENT_AUTO_SEND_ENABLED`

@@ -406,9 +406,9 @@ Authorization: Bearer <PROCUREMENT_API_TOKEN>
 ```
 
 令牌未配置或短于 32 字符返回 **503**，缺失或错误返回 **401**。它不能与
-`XIANYU_API_TOKEN`/`CATALOG_SYNC_TOKEN` 共用，不得进入浏览器、数据库、日志或 Git。旧版 v1
-任务还受 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 保护；v2 任务改由商城的 Root/支付授权快照、
-服务端令牌和本地来源快照共同约束。
+`XIANYU_API_TOKEN`/`CATALOG_SYNC_TOKEN` 共用，不得进入浏览器、数据库、日志或 Git。v1 与 v2
+任务都受 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 保护；v2 还必须同时通过商城的 Root/支付授权快照、
+服务端令牌和本地来源快照门禁，逐任务授权不能替代服务器端白名单。
 
 ### `POST /api/v1/procurement-tasks`
 
@@ -448,11 +448,11 @@ v1 兼容请求只允许未授权的 `paid_order` 默认值；商城 POC 使用 
 日本客户姓名、电话、地址、支付资料等额外字段不能进入任务。标题自由文本还会经过隐私/支付资料
 扫描，错误响应只返回稳定 code，不回显正文。创建前依次验证：
 
-1. v1 任务的 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 已配置且包含该商品；v2 跳过这项静态白名单；
+1. v1 与 v2 任务的 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST` 均已配置且包含该商品；
 2. 标题未命中客户、联系方式、卡号或支付资料安全规则；
 3. Item 表存在该商品；
 4. 存在最新发布 Catalog 快照；
-5. 彦诗筛选源的 `availability` 为 `active` 或 `suspected_missing`，且 `currency=CNY`；
+5. 彦诗筛选源存在 CNY 价格快照；目录 `availability` 仅供展示和同步观察，不阻断采购对话；
 6. 发布价格与 `price_cny_minor` 完全一致；
 7. 同一 `item_id` 没有其他活动采购任务。
 
@@ -476,11 +476,11 @@ v1 兼容请求只允许未授权的 `paid_order` 默认值；商城 POC 使用 
 | 状态码 | code/说明 |
 |--------|-----------|
 | 401 | 采购 Bearer 令牌缺失或错误 |
-| 403 | v1 的 `source_item_not_allowlisted` |
+| 403 | v1 或 v2 的 `source_item_not_allowlisted` |
 | 404 | `source_item_not_found` |
 | 409 | `idempotency_conflict`、`task_id_conflict`、`source_item_has_active_procurement`、`source_not_active` 或 `source_price_changed` |
 | 422 | body、UUID、幂等键、额外字段或自由文本安全规则不符合契约 |
-| 503 | 采购令牌或 v1 商品白名单未配置 |
+| 503 | 采购令牌或商品白名单未配置 |
 
 ### `GET /api/v1/procurement-tasks/{task_id}`
 
