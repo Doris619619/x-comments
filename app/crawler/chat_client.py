@@ -42,8 +42,8 @@ FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SELF_DIRECTIONS = {"self", "outgoing", "buyer", "mine"}
 SELLER_DIRECTIONS = {"seller", "incoming", "other"}
 MAX_MESSAGE_NODES = 500
-SEND_CONFIRMATION_ATTEMPTS = 20
-SEND_CONFIRMATION_DELAY_MS = 100
+SEND_CONFIRMATION_ATTEMPTS = 40
+SEND_CONFIRMATION_DELAY_MS = 250
 
 
 class ChatSafetyError(RiskControlBlocked):
@@ -138,7 +138,7 @@ class ChatMessageSnapshot:
 @dataclass(frozen=True, slots=True)
 class SendEvidence:
     """
-    表示一次点击发送后由页面中本人消息文本确认的最小证据。
+    表示一次单次提交后由页面中本人消息文本确认的最小证据。
 
     证据只含绑定 ID、策略决策 ID、草稿摘要与确认消息指纹，不保存账号凭据。
     """
@@ -595,7 +595,7 @@ class XianyuChatClient:
 
         调用方必须显式传入 ``auto_send_enabled=True`` 和读取阶段的最新消息指纹。方法在账号
         guard 内再次确认身份、风险和消息未变化，任何不确定均抛出 ``ChatSafetyError``；
-        唯一写操作是填入聊天输入框并单击聊天发送按钮，且不会自动重试。
+        唯一提交动作是按页面占位文案明确支持的 Enter 键发送，且不会自动重试。
         """
 
         if auto_send_enabled is not True:
@@ -618,7 +618,9 @@ class XianyuChatClient:
             _, send_button = await self._assert_chat_ready()
             if not await send_button.is_enabled():
                 raise ChatSafetyError("chat_send_disabled", "聊天发送按钮当前不可用")
-            await send_button.click(timeout=5_000)
+            # 生产 Canary 已确认按钮 click 没有形成消息；页面自身明确声明 Enter 可发送。
+            # 这里只执行一次 Enter，不再回退点击按钮，避免网络结果不确定时重复提交。
+            await chat_input.press("Enter", timeout=5_000)
             confirmation = await self._wait_for_own_confirmation(draft.text, own_count_before)
             return SendEvidence(
                 source_item_id=self._binding.source_item_id,
@@ -785,8 +787,8 @@ class XianyuChatClient:
         """
         等待可见本人同文消息数量比点击前增加，并返回新增消息快照。
 
-        参数为草稿和点击前数量；固定短轮询内未确认时抛出 ``ChatSafetyError``；只读取页面，
-        不会再次点击发送。
+        参数为草稿和提交前数量；最长约十秒的固定轮询内未确认时抛出 ``ChatSafetyError``；
+        只读取页面，不会再次按键或点击发送。
         """
 
         expected = normalize_chat_text(text)
@@ -821,5 +823,5 @@ class XianyuChatClient:
             await self._page.wait_for_timeout(SEND_CONFIRMATION_DELAY_MS)
         raise ChatSafetyError(
             "send_confirmation_missing",
-            "点击发送后未能确认本人同文消息，禁止自动重试",
+            "提交发送后未能确认本人同文消息，禁止自动重试",
         )

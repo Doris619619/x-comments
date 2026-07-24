@@ -53,7 +53,9 @@ class FakeNode:
     enabled: bool = True
     filled_text: str = ""
     click_count: int = 0
+    pressed_keys: list[str] = field(default_factory=list)
     on_click: Callable[[], None] | None = None
+    on_press: Callable[[str], None] | None = None
 
 
 class FakeLocator:
@@ -170,6 +172,19 @@ class FakeLocator:
         node.click_count += 1
         if node.on_click is not None:
             node.on_click()
+
+    async def press(self, key: str, *, timeout: float | None = None) -> None:
+        """
+        记录唯一输入节点的按键，并执行测试回调。
+
+        参数为按键和可选超时；无返回；节点不唯一时抛出 ``AssertionError``；副作用仅在内存。
+        """
+
+        del timeout
+        node = self._single()
+        node.pressed_keys.append(key)
+        if node.on_press is not None:
+            node.on_press(key)
 
 
 class FakeContext:
@@ -316,7 +331,7 @@ def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
     """
     创建绑定商品 ``item-100`` 的完整离线聊天 DOM。
 
-    参数控制点击发送后是否追加本人消息；返回可变测试环境；不启动浏览器或访问网络。
+    参数控制按 Enter 后是否追加本人消息；返回可变测试环境；不启动浏览器或访问网络。
     """
 
     input_node = FakeNode()
@@ -348,7 +363,7 @@ def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
 
     def append_sent_message() -> None:
         """
-        把输入框当前文本追加为唯一本人消息，模拟点击后 DOM 确认。
+        把输入框当前文本追加为唯一本人消息，模拟 Enter 提交后的 DOM 确认。
 
         无输入和返回；副作用只修改共享内存消息列表。
         """
@@ -366,7 +381,13 @@ def make_chat_environment(*, confirm_send: bool = True) -> FakeChatEnvironment:
         messages.insert(0, sent)
         own_messages.insert(0, sent)
 
-    send_node.on_click = append_sent_message
+    def submit_by_enter(key: str) -> None:
+        """只在生产代码约定的 Enter 键出现时模拟一次页面发送。"""
+
+        if key == "Enter":
+            append_sent_message()
+
+    input_node.on_press = submit_by_enter
     page = FakePage("https://www.goofish.com/item?id=item-100", nodes_by_selector)
     open_node.text = "聊一聊"
     open_node.attributes["href"] = (
@@ -506,6 +527,7 @@ async def test_send_requires_explicit_flag_and_never_touches_page_when_disabled(
     assert caught.value.code == "auto_send_disabled"
     assert guard.entries == 0
     assert environment.input_node.filled_text == ""
+    assert environment.input_node.pressed_keys == []
     assert environment.send_node.click_count == 0
 
 
@@ -530,7 +552,8 @@ async def test_send_holds_guard_rechecks_message_and_confirms_own_text() -> None
     assert guard.entries == 2
     assert guard.active == 0
     assert environment.input_node.filled_text == "请问近期可以发货吗？"
-    assert environment.send_node.click_count == 1
+    assert environment.input_node.pressed_keys == ["Enter"]
+    assert environment.send_node.click_count == 0
     assert environment.open_node.click_count == 0
     assert len(environment.own_messages) == 1
     assert evidence.source_item_id == "item-100"
@@ -645,11 +668,11 @@ async def test_login_or_captcha_signal_reuses_risk_detection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_send_confirmation_never_retries_click() -> None:
+async def test_missing_send_confirmation_never_retries_submit() -> None:
     """
-    验证点击后未出现本人同文消息时返回不确定错误且绝不重复发送。
+    验证 Enter 提交后未出现本人同文消息时返回不确定错误且绝不重复发送。
 
-    无输入；断言失败抛出 ``AssertionError``；首次点击仅记录在离线节点。
+    无输入；断言失败抛出 ``AssertionError``；首次按键仅记录在离线节点。
     """
 
     environment = make_chat_environment(confirm_send=False)
@@ -665,7 +688,8 @@ async def test_missing_send_confirmation_never_retries_click() -> None:
         )
 
     assert caught.value.code == "send_confirmation_missing"
-    assert environment.send_node.click_count == 1
+    assert environment.input_node.pressed_keys == ["Enter"]
+    assert environment.send_node.click_count == 0
     assert environment.open_node.click_count == 0
 
 
