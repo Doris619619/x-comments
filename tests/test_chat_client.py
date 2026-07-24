@@ -658,7 +658,7 @@ async def test_discovers_seller_and_accepts_hashed_account_binding() -> None:
 
 def test_open_chat_selector_requires_complete_item_and_seller_binding() -> None:
     """
-    验证聊天入口依赖完整商品/卖家身份参数，不依赖会漂移的 CSS 类和文案。
+    验证聊天入口依赖完整身份参数和主商品动作语义，不依赖会漂移的 CSS 类。
 
     无输入；断言失败抛出 AssertionError；只检查集中选择器字符串，不访问页面或网络。
     """
@@ -666,18 +666,21 @@ def test_open_chat_selector_requires_complete_item_and_seller_binding() -> None:
     assert "want--" not in OPEN_CHAT_SELECTOR
     assert "itemId=" in OPEN_CHAT_SELECTOR
     assert "peerUserId=" in OPEN_CHAT_SELECTOR
+    assert "聊一聊" in OPEN_CHAT_SELECTOR
+    assert "我想要" in OPEN_CHAT_SELECTOR
+    assert "消息" not in OPEN_CHAT_SELECTOR
 
 
 @pytest.mark.asyncio
 async def test_discovers_binding_when_chat_entry_label_changes() -> None:
     """
-    验证闲鱼仅调整入口文案时，完整商品/卖家参数仍可建立安全绑定。
+    验证闲鱼使用另一个允许的主商品动作文案时仍可建立安全绑定。
 
     无输入；只修改离线节点文案并读取 URL 与账号 Cookie；不点击、不联网、不发送。
     """
 
     environment = make_chat_environment()
-    environment.open_node.text = "消息"
+    environment.open_node.text = "我想要"
     expected_fingerprint = hashlib.sha256(b"account-300").hexdigest()
 
     binding = await discover_chat_binding(
