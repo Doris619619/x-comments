@@ -421,17 +421,50 @@ async def _read_stable_chat_entry(page: Page) -> tuple[Locator, str]:
 
     last_error: ChatSafetyError | None = None
     for attempt in range(CHAT_ENTRY_STABILITY_ATTEMPTS):
-        try:
-            entry = await _unique_visible_locator(page, OPEN_CHAT_SELECTOR, "聊天入口")
-        except ChatSafetyError as error:
-            last_error = error
-        else:
-            href = await entry.get_attribute("href")
+        locator = page.locator(OPEN_CHAT_SELECTOR)
+        # 闲鱼会替换刚显示的 React 节点。可见性和 href 必须在浏览器同一次执行中读取，
+        # 否则两个 await 之间的重渲染会让 locator 指向另一个尚未带 href 的节点。
+        raw_entries: object = await locator.evaluate_all(
+            """nodes => nodes
+              .map((node, index) => {
+                const style = window.getComputedStyle(node);
+                return {
+                  index,
+                  href: node.getAttribute('href'),
+                  visible: style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && node.getClientRects().length > 0,
+                };
+              })
+              .filter(entry => entry.visible)"""
+        )
+        entries: list[tuple[int, str | None]] = []
+        if isinstance(raw_entries, list):
+            for raw_entry in raw_entries:
+                if not isinstance(raw_entry, dict):
+                    continue
+                index = raw_entry.get("index")
+                href = raw_entry.get("href")
+                if isinstance(index, int) and (href is None or isinstance(href, str)):
+                    entries.append((index, href))
+
+        if len(entries) > 1:
+            last_error = ChatSafetyError(
+                "ambiguous_chat_dom",
+                "聊天入口必须且只能匹配一个可见元素",
+            )
+        elif len(entries) == 1:
+            index, href = entries[0]
             if href:
-                return entry, href
+                return locator.nth(index), href
             last_error = ChatSafetyError(
                 "chat_entry_identity_invalid",
                 "聊天入口缺少身份 URL",
+            )
+        else:
+            last_error = ChatSafetyError(
+                "ambiguous_chat_dom",
+                "聊天入口必须且只能匹配一个可见元素",
             )
         if attempt + 1 < CHAT_ENTRY_STABILITY_ATTEMPTS:
             await page.wait_for_timeout(CHAT_ENTRY_STABILITY_DELAY_MS)

@@ -155,6 +155,23 @@ class FakeLocator:
         del expression
         return self._single().attributes.get("data-flex-direction", "column")
 
+    async def evaluate_all(self, expression: str) -> list[dict[str, object]]:
+        """
+        原子返回可见节点的下标和 href，模拟生产浏览器中的同一执行快照。
+
+        参数为生产 JavaScript；返回脱敏结构列表；不执行脚本或访问网络。
+        """
+
+        del expression
+        entries: list[dict[str, object]] = []
+        for index, node in enumerate(self._nodes):
+            if not node.visible:
+                continue
+            overrides = node.attribute_read_overrides.get("href")
+            href = overrides.pop(0) if overrides else node.attributes.get("href")
+            entries.append({"index": index, "href": href, "visible": True})
+        return entries
+
     async def fill(self, value: str, *, timeout: float | None = None) -> None:
         """
         记录对唯一节点执行的输入文本。
