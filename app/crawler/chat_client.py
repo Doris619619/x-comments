@@ -34,7 +34,11 @@ from app.crawler.chat_selectors import (
     OPEN_CHAT_SELECTOR,
     OWN_CHAT_MESSAGE_SELECTOR,
 )
-from app.crawler.risk_control import RiskControlBlocked, detect_risk
+from app.crawler.risk_control import (
+    RiskControlBlocked,
+    detect_risk,
+    detect_risk_response,
+)
 from app.services.xianyu_account_guard import AccountAccessGuard
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
@@ -665,19 +669,24 @@ class XianyuChatClient:
         self._page = page
         self._binding = binding
         self._account_guard = account_guard
-        self._blocked_http_status: int | None = None
+        self._blocked_risk_reason: str | None = None
         self._active_send_observation: _ActiveSendObservation | None = None
         self._observed_page_ids: set[int] = set()
 
         def observe_status(response: Response) -> None:
             """
-            记录聊天上下文出现的首个 403/429。
+            记录聊天上下文出现的首个访问控制信号。
 
-            输入 Playwright 响应；无返回；只保存粗粒度状态码，不读取或记录响应正文。
+            输入 Playwright 响应；无返回；只保存粗粒度原因，不读取或记录响应正文。
+            HTTP 200 的 TMD 风控流程也属于阻塞，不应继续等待聊天 DOM 超时。
             """
 
-            if response.status in {403, 429} and self._blocked_http_status is None:
-                self._blocked_http_status = response.status
+            response_url = str(
+                getattr(response, "url", getattr(response.request, "url", ""))
+            )
+            reason = detect_risk_response(response_url, response.status)
+            if reason and self._blocked_risk_reason is None:
+                self._blocked_risk_reason = reason
 
         # 生产 Playwright BrowserContext 提供 on；离线 FakeContext 不注册网络监听器。
         if hasattr(self._page.context, "on"):
@@ -1009,8 +1018,8 @@ class XianyuChatClient:
         无输入和返回；风险信号或 body 不唯一时抛出 ``ChatSafetyError``；只读取页面。
         """
 
-        if self._blocked_http_status in {403, 429}:
-            raise ChatSafetyError("http_risk_blocked", "闲鱼聊天上下文返回访问控制状态")
+        if self._blocked_risk_reason:
+            raise ChatSafetyError("http_risk_blocked", self._blocked_risk_reason)
         body = await _unique_visible_locator(self._page, BODY_SELECTOR, "页面主体")
         visible_text = await body.inner_text(timeout=5_000)
         reason = detect_risk(self._page.url, visible_text)

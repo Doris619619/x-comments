@@ -26,6 +26,7 @@ from app.crawler.chat_client import (
     discover_chat_binding,
     item_url_matches_binding,
 )
+from app.crawler.risk_control import detect_risk_response
 from app.services.xianyu_account_guard import AccountAccessGuard
 
 
@@ -131,24 +132,26 @@ class PlaywrightXianyuChatFactory:
         if not state_path.is_file():
             raise ChatSafetyError("login_state_missing", "闲鱼登录态文件不存在")
 
+        blocked_reason: str | None = None
         try:
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(headless=self._settings.xianyu_headless)
                 try:
                     context = await browser.new_context(storage_state=str(state_path))
                     page = await context.new_page()
-                    blocked_status: int | None = None
 
                     def observe_status(response: Response) -> None:
                         """
-                        记录当前页面生命周期首次 403/429，不读取响应正文。
+                        记录当前页面生命周期首次访问控制信号，不读取响应正文。
 
-                        输入 Playwright 响应；无返回；副作用仅更新闭包中的粗粒度状态码。
+                        输入 Playwright 响应；无返回；副作用仅更新闭包中的粗粒度原因。
+                        除 403/429 外，闲鱼返回 HTTP 200 的 TMD 风控页也必须失败关闭。
                         """
 
-                        nonlocal blocked_status
-                        if response.status in {403, 429} and blocked_status is None:
-                            blocked_status = response.status
+                        nonlocal blocked_reason
+                        reason = detect_risk_response(response.url, response.status)
+                        if reason and blocked_reason is None:
+                            blocked_reason = reason
 
                     # 使用上下文级监听覆盖商品页和点击后新打开的聊天页。
                     context.on("response", observe_status)
@@ -159,10 +162,12 @@ class PlaywrightXianyuChatFactory:
                             timeout=self._settings.xianyu_verify_timeout_seconds * 1000,
                         )
                     navigation_status = navigation.status if navigation is not None else 0
-                    if blocked_status in {403, 429} or navigation_status in {403, 429}:
+                    navigation_reason = detect_risk_response(page.url, navigation_status)
+                    risk_reason = blocked_reason or navigation_reason
+                    if risk_reason:
                         raise ChatSafetyError(
                             "http_risk_blocked",
-                            "闲鱼页面返回访问控制状态",
+                            risk_reason,
                         )
                     binding = await discover_chat_binding(
                         page,
@@ -184,6 +189,8 @@ class PlaywrightXianyuChatFactory:
         except ChatSafetyError:
             raise
         except PlaywrightTimeoutError:
+            if blocked_reason:
+                raise ChatSafetyError("http_risk_blocked", blocked_reason) from None
             raise ChatSafetyError("chat_page_timeout", "闲鱼聊天页面访问超时") from None
         except Exception:
             raise ChatSafetyError("chat_page_error", "闲鱼聊天页面无法安全确认") from None

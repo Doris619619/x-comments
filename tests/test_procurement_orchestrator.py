@@ -458,6 +458,67 @@ async def test_success_waits_for_each_callback_then_sends_once(
 
 
 @pytest.mark.asyncio
+async def test_seller_reply_generates_and_sends_second_round_in_same_canary(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """
+    验证同一 Canary 收到卖家回复后会生成并发送第二轮，而不是创建另一条单轮任务。
+
+    输入隔离数据库工厂；断言失败抛出 ``AssertionError``；只使用 fake 模型与聊天客户端。
+    """
+
+    task_id = seed_task(
+        session_factory,
+        task_status=ProcurementExecutionTaskStatus.AWAITING_SELLER_REPLY,
+        session_status=ConversationSessionStatus.WAITING_SELLER,
+        round_count=1,
+        expected_seller_id=SELLER_ID,
+        baseline=BASELINE,
+        with_sent_outbound=True,
+    )
+    client = FakeChatClient(seller_snapshot("还在，但功能和配件情况尚未说明"))
+    generator = FakeDraftGenerator()
+    orchestrator = make_orchestrator(
+        session_factory,
+        client,
+        generator,
+        auto_send_enabled=True,
+    )
+
+    # 第一次处理完整保存卖家新增回复；事件送达后，第二次才允许生成回复草稿。
+    assert await orchestrator.process_next("worker-multi-round") is True
+    mark_all_outbox_delivered(session_factory)
+    assert await orchestrator.process_next("worker-multi-round") is True
+    assert generator.calls == 1
+    assert client.send_calls == 0
+    mark_all_outbox_delivered(session_factory)
+
+    # 草稿回调已确认后，同一任务执行第二次且仅一次发送。
+    assert await orchestrator.process_next("worker-multi-round") is True
+
+    with session_factory() as db:
+        task = db.get(ProcurementExecutionTask, task_id)
+        conversation = db.scalar(
+            select(ConversationSession).where(ConversationSession.task_id == task_id)
+        )
+        messages = list(
+            db.scalars(
+                select(ConversationMessage).order_by(ConversationMessage.seq.asc())
+            )
+        )
+        assert task is not None
+        assert conversation is not None
+        assert task.status is ProcurementExecutionTaskStatus.AWAITING_SELLER_REPLY
+        assert conversation.round_count == 2
+        assert client.send_calls == 1
+        assert [message.direction for message in messages] == [
+            ConversationMessageDirection.OUTBOUND,
+            ConversationMessageDirection.INBOUND,
+            ConversationMessageDirection.OUTBOUND,
+        ]
+
+
+@pytest.mark.asyncio
 async def test_auto_send_disabled_persists_draft_without_sending(
     session_factory: sessionmaker[Session],
 ) -> None:
