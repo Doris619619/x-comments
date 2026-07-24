@@ -49,6 +49,8 @@ SEND_POINTER_SETTLE_MS = 90
 SEND_POINTER_PRESS_MS = 70
 SEND_REQUEST_WAIT_ATTEMPTS = 20
 SEND_REQUEST_WAIT_DELAY_MS = 100
+CHAT_ENTRY_STABILITY_ATTEMPTS = 20
+CHAT_ENTRY_STABILITY_DELAY_MS = 100
 ALLOWED_SEND_REQUEST_METHODS = {"POST", "PUT", "PATCH"}
 ALLOWED_SEND_REQUEST_RESOURCE_TYPES = {"fetch", "xhr"}
 ALLOWED_SEND_REQUEST_HOST_SUFFIXES = (
@@ -409,6 +411,36 @@ async def _unique_visible_locator(page: Page, selector: str, label: str) -> Loca
     return visible[0]
 
 
+async def _read_stable_chat_entry(page: Page) -> tuple[Locator, str]:
+    """
+    在客户端渲染竞态内读取唯一聊天入口及其非空身份 URL。
+
+    参数为商品页；返回稳定 locator 与 href；候选长期缺失、歧义或 href 未就绪时抛出
+    ``ChatSafetyError``。副作用仅为短暂轮询 DOM，不导航、不点击、不输入也不发送。
+    """
+
+    last_error: ChatSafetyError | None = None
+    for attempt in range(CHAT_ENTRY_STABILITY_ATTEMPTS):
+        try:
+            entry = await _unique_visible_locator(page, OPEN_CHAT_SELECTOR, "聊天入口")
+        except ChatSafetyError as error:
+            last_error = error
+        else:
+            href = await entry.get_attribute("href")
+            if href:
+                return entry, href
+            last_error = ChatSafetyError(
+                "chat_entry_identity_invalid",
+                "聊天入口缺少身份 URL",
+            )
+        if attempt + 1 < CHAT_ENTRY_STABILITY_ATTEMPTS:
+            await page.wait_for_timeout(CHAT_ENTRY_STABILITY_DELAY_MS)
+
+    if last_error is not None:
+        raise last_error
+    raise ChatSafetyError("chat_entry_identity_invalid", "聊天入口身份未稳定")
+
+
 async def _read_unique_attribute(
     locator: Locator, attribute_names: tuple[str, ...], label: str
 ) -> str:
@@ -560,19 +592,14 @@ async def discover_chat_binding(
             raise ChatSafetyError("item_url_mismatch", "当前 URL 与绑定闲鱼商品不一致")
 
         await _assert_account_cookie_identity(page, expected_account_id)
-        # 主商品“聊一聊”由客户端延迟渲染；只等待绑定 IM 的 want 控件，不匹配侧栏消息入口。
+        # 聊天入口由客户端延迟渲染；动态类名和文案不作为身份依据，完整 URL 参数与
+        # 唯一可见节点才是安全边界，后续仍会逐项核对商品、卖家与买家账号。
         await page.wait_for_selector(
             OPEN_CHAT_SELECTOR,
             state="visible",
             timeout=CHAT_ENTRY_WAIT_MILLISECONDS,
         )
-        entry = await _unique_visible_locator(page, OPEN_CHAT_SELECTOR, "聊天入口")
-        entry_text = normalize_chat_text(await entry.inner_text(timeout=2_000))
-        if entry_text != "聊一聊":
-            raise ChatSafetyError("chat_entry_label_changed", "聊天入口文案与标定结果不一致")
-        href = await entry.get_attribute("href")
-        if not href:
-            raise ChatSafetyError("chat_entry_identity_invalid", "聊天入口缺少身份 URL")
+        _entry, href = await _read_stable_chat_entry(page)
         seller_id = _parse_chat_entry_href(page.url, href, source_item_id)
         return ChatBinding(
             source_item_id=source_item_id,
@@ -721,7 +748,7 @@ class XianyuChatClient:
 
         async with self._account_guard.hold():
             await self._assert_bound_identity()
-            trigger = await _unique_visible_locator(self._page, OPEN_CHAT_SELECTOR, "聊天入口")
+            trigger, _href = await _read_stable_chat_entry(self._page)
             if not await trigger.is_enabled():
                 raise ChatSafetyError("chat_entry_disabled", "聊天入口当前不可用")
             previous_pages = set(self._page.context.pages)
@@ -967,16 +994,11 @@ class XianyuChatClient:
         await self._assert_safe()
         await _assert_account_cookie_identity(self._page, self._binding.account_id)
         if item_url_matches_binding(self._page.url, self._binding.source_item_id):
-            entry = await _unique_visible_locator(self._page, OPEN_CHAT_SELECTOR, "聊天入口")
-            href = await entry.get_attribute("href")
-            seller_id = (
-                _parse_chat_entry_href(
-                    self._page.url,
-                    href,
-                    self._binding.source_item_id,
-                )
-                if href
-                else None
+            _entry, href = await _read_stable_chat_entry(self._page)
+            seller_id = _parse_chat_entry_href(
+                self._page.url,
+                href,
+                self._binding.source_item_id,
             )
             if seller_id != self._binding.seller_id:
                 raise ChatSafetyError("chat_identity_mismatch", "卖家身份与任务绑定不一致")
