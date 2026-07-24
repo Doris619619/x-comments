@@ -936,6 +936,37 @@ async def test_login_or_captcha_signal_reuses_risk_detection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_200_tmd_punish_response_blocks_chat_dom_access() -> None:
+    """
+    验证聊天生命周期出现 HTTP 200 的 TMD 风控响应后立即失败关闭。
+
+    无输入；断言失败抛出 ``AssertionError``；仅触发离线上下文事件，不访问网络。
+    """
+
+    environment = make_chat_environment()
+    client = make_client(environment, FakeAccountGuard())
+    request = FakeRequest(
+        url=(
+            "https://h5api.m.goofish.com/h5/example/1.0/"
+            "_____tmd_____/punishTextFetch"
+        ),
+        method="GET",
+        resource_type="xhr",
+        post_data=None,
+    )
+    environment.page.context.emit(
+        "response",
+        FakeResponse(request=request, status=200),
+    )
+
+    with pytest.raises(ChatSafetyError) as caught:
+        await client.read_latest_message()
+
+    assert caught.value.code == "http_risk_blocked"
+    assert environment.send_node.click_count == 0
+
+
+@pytest.mark.asyncio
 async def test_missing_send_confirmation_never_retries_submit() -> None:
     """
     验证按钮提交后未出现本人同文消息时返回不确定错误且绝不重复发送。
