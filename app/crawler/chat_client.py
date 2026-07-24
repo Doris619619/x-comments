@@ -595,7 +595,7 @@ class XianyuChatClient:
 
         调用方必须显式传入 ``auto_send_enabled=True`` 和读取阶段的最新消息指纹。方法在账号
         guard 内再次确认身份、风险和消息未变化，任何不确定均抛出 ``ChatSafetyError``；
-        唯一提交动作是按页面占位文案明确支持的 Enter 键发送，且不会自动重试。
+        唯一提交动作是在逐字键盘输入后点击语义确认的“发送”按钮，且不会自动重试。
         """
 
         if auto_send_enabled is not True:
@@ -605,22 +605,31 @@ class XianyuChatClient:
 
         async with self._account_guard.hold():
             await self._assert_bound_identity()
-            chat_input, _ = await self._assert_chat_ready()
+            chat_input, send_button = await self._assert_chat_ready()
+            await self._assert_send_button_ready(send_button)
             latest = await self._read_latest_message_unlocked()
             self._assert_unchanged(latest, expected_latest_fingerprint)
             own_count_before = await self._count_matching_own_messages(draft.text)
 
-            await chat_input.fill(draft.text, timeout=5_000)
+            # 闲鱼受控文本框对直接 fill 显示文字，但真实 Canary 未形成可提交的内部状态。
+            # 先清空，再逐字产生键盘事件；随后还会读取 value 做同文校验。
+            await chat_input.fill("", timeout=5_000)
+            await chat_input.press_sequentially(draft.text, delay=50)
+            if normalize_chat_text(await chat_input.input_value()) != normalize_chat_text(
+                draft.text
+            ):
+                raise ChatSafetyError(
+                    "chat_input_not_confirmed",
+                    "聊天输入框未能确认完整草稿",
+                )
             await self._assert_bound_identity()
             latest_before_click = await self._read_latest_message_unlocked()
             self._assert_unchanged(latest_before_click, expected_latest_fingerprint)
 
             _, send_button = await self._assert_chat_ready()
-            if not await send_button.is_enabled():
-                raise ChatSafetyError("chat_send_disabled", "聊天发送按钮当前不可用")
-            # 生产 Canary 已确认按钮 click 没有形成消息；页面自身明确声明 Enter 可发送。
-            # 这里只执行一次 Enter，不再回退点击按钮，避免网络结果不确定时重复提交。
-            await chat_input.press("Enter", timeout=5_000)
+            await self._assert_send_button_ready(send_button)
+            # 只执行一次已确认按钮点击；结果不确定时不会改用 Enter 或再次点击。
+            await send_button.click(timeout=5_000)
             confirmation = await self._wait_for_own_confirmation(draft.text, own_count_before)
             return SendEvidence(
                 source_item_id=self._binding.source_item_id,
@@ -706,6 +715,25 @@ class XianyuChatClient:
         send_button = await _unique_visible_locator(self._page, CHAT_SEND_SELECTOR, "聊天发送按钮")
         return chat_input, send_button
 
+    async def _assert_send_button_ready(self, send_button: Locator) -> None:
+        """
+        确认唯一按钮已启用且公开标签仍为“发送”。
+
+        输入由 ``_assert_chat_ready`` 返回的唯一 Locator；无返回；禁用或语义漂移时抛出
+        ``ChatSafetyError``。函数只读取按钮状态，不输入、不按键也不点击。
+        """
+
+        if not await send_button.is_enabled():
+            raise ChatSafetyError("chat_send_disabled", "聊天发送按钮当前不可用")
+        send_label = "".join(
+            normalize_chat_text(await send_button.inner_text(timeout=2_000)).split()
+        )
+        if send_label != "发送":
+            raise ChatSafetyError(
+                "chat_send_label_changed",
+                "聊天发送按钮语义与标定结果不一致",
+            )
+
     async def _read_latest_message_unlocked(self) -> ChatMessageSnapshot:
         """
         在调用方已持有账号 guard 时读取最后一个可见消息节点。
@@ -788,7 +816,7 @@ class XianyuChatClient:
         等待可见本人同文消息数量比点击前增加，并返回新增消息快照。
 
         参数为草稿和提交前数量；最长约十秒的固定轮询内未确认时抛出 ``ChatSafetyError``；
-        只读取页面，不会再次按键或点击发送。
+        只读取页面，不会再次输入、按键或点击发送。
         """
 
         expected = normalize_chat_text(text)
