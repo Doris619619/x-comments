@@ -298,7 +298,7 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 |------|----------|------------|
 | `procurement_execution_tasks` | `task_id`、`contract_version`、`execution_mode`、任务级自动发送授权快照、`source_item_id`、标题/CNY 整数分快照、目标、轮次/期限、请求幂等键/body 哈希、状态/下一动作、租约、摘要/原因与时间 | `task_id` 主键、请求幂等键唯一；价格非负、轮次 1–3；同一商品只能有一个活动任务；授权只允许聊天发送，不代表购买或付款 |
 | `conversation_sessions` | `session_id`、`task_id`、`source_item_id`、卖家快照、账号别名、`status`、`round_count`、`seller_poll_attempt_count`、`event_seq`、租约与时间 | `task_id` 唯一；只保存商城任务 UUID，不保存客户资料、Cookie 或密码 |
-| `conversation_messages` | 会话内 `seq`、方向、角色、正文、正文哈希、回复关系、LLM/策略字段、发送时间 | `(session_id, seq)`、`(session_id, external_message_id)` 和 `idempotency_key` 唯一；一条出站消息从草稿演进至发送结果，不重复建行 |
+| `conversation_messages` | 会话内 `seq`、方向、角色、正文、正文哈希、回复关系、LLM/策略字段、发送时间 | `(session_id, seq)`、`(session_id, external_message_id)` 和 `idempotency_key` 唯一；一条出站消息从草稿演进至发送结果，不重复建行；`sent` 只在匹配草稿的网络出站证据和本人消息回显均确认后写入 |
 | `procurement_audit_logs` | 任务/会话/消息关联、actor、动作、前后状态、原因、脱敏元数据、关联与幂等键 | 只追加；同任务、幂等键和动作不得重复；普通日志不得记录消息正文 |
 | `procurement_outbox` | `event_id`、任务内 `event_seq`、事件类型、JSON payload、投递状态、租约、重试时间 | `event_id`、幂等键及 `(task_id, event_seq)` 唯一；供后续回调商城的事务 Outbox 使用 |
 
@@ -307,6 +307,11 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 使用 `operator_canary`，默认不授权自动发送。会话状态为 `pending_open`、`active`、`waiting_seller`、`completed`、
 `human_review_required`、`blocked`、`failed` 或 `cancelled`。消息状态区分入站观察/分析、出站草稿/
 策略/排队/发送以及 `policy_blocked`、`send_failed`、`superseded`，`sent` 只能表示页面结果已确认。
+
+发送网络证据不新增正文列。它以固定脱敏字段写入 `procurement_audit_logs.metadata_redacted`，并在
+对应 Outbox 事件的 `data.send_request_evidence` 中回传：`request_observed`、`transport`、
+`endpoint_sha256`、`method`、`response_observed`、`response_status`。其中端点只保存忽略查询参数的
+协议/主机/路径 SHA-256；不得写入完整 URL、请求体、Cookie、买家账号或卖家身份。
 
 ---
 

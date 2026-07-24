@@ -14,9 +14,9 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, unquote_plus, urljoin, urlparse
 
-from playwright.async_api import Locator, Page, Response
+from playwright.async_api import Locator, Page, Request, Response, WebSocket
 
 from app.crawler.chat_selectors import (
     ACCOUNT_IDENTITY_COOKIE_NAME,
@@ -44,6 +44,18 @@ SELLER_DIRECTIONS = {"seller", "incoming", "other"}
 MAX_MESSAGE_NODES = 500
 SEND_CONFIRMATION_ATTEMPTS = 40
 SEND_CONFIRMATION_DELAY_MS = 250
+SEND_POINTER_MOVE_STEPS = 8
+SEND_POINTER_SETTLE_MS = 90
+SEND_POINTER_PRESS_MS = 70
+SEND_REQUEST_WAIT_ATTEMPTS = 20
+SEND_REQUEST_WAIT_DELAY_MS = 100
+ALLOWED_SEND_REQUEST_METHODS = {"POST", "PUT", "PATCH"}
+ALLOWED_SEND_REQUEST_RESOURCE_TYPES = {"fetch", "xhr"}
+ALLOWED_SEND_REQUEST_HOST_SUFFIXES = (
+    "goofish.com",
+    "taobao.com",
+    "alibaba.com",
+)
 
 
 class ChatSafetyError(RiskControlBlocked):
@@ -62,6 +74,80 @@ class ChatSafetyError(RiskControlBlocked):
 
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class SendRequestEvidence:
+    """
+    保存一次发送窗口内观察到的最小脱敏网络证据。
+
+    只记录请求是否出现、传输类型、端点 SHA-256、HTTP 方法和粗粒度响应状态；不保存 URL、
+    请求正文、Cookie、卖家昵称或账号凭据。
+    """
+
+    request_observed: bool
+    transport: str | None = None
+    endpoint_sha256: str | None = None
+    method: str | None = None
+    response_observed: bool = False
+    response_status: int | None = None
+
+
+class ChatSendUncertainError(ChatSafetyError):
+    """
+    表示唯一鼠标提交后的网络或页面结果无法同时确认。
+
+    异常携带脱敏网络证据，供上层持久化审计；调用方必须转人工，不能再次点击或改用 Enter。
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        request_evidence: SendRequestEvidence,
+    ) -> None:
+        """
+        保存稳定错误码与脱敏网络证据。
+
+        输入安全错误信息和证据；无返回；不记录正文、不访问页面也不执行重试。
+        """
+
+        super().__init__(code, message)
+        self.request_evidence = request_evidence
+
+
+@dataclass(slots=True)
+class _ActiveSendObservation:
+    """
+    在唯一点击窗口内暂存网络监听状态。
+
+    对象只存在于内存，草稿正文仅用于即时匹配，点击结束后立即清除且不会写入日志或数据库。
+    """
+
+    draft_text: str
+    request_observed: bool = False
+    transport: str | None = None
+    endpoint_sha256: str | None = None
+    method: str | None = None
+    response_observed: bool = False
+    response_status: int | None = None
+    request_identity: int | None = None
+
+    def snapshot(self) -> SendRequestEvidence:
+        """
+        生成不含草稿正文和请求内容的不可变证据。
+
+        无输入；返回脱敏证据；没有页面、网络或持久化副作用。
+        """
+
+        return SendRequestEvidence(
+            request_observed=self.request_observed,
+            transport=self.transport,
+            endpoint_sha256=self.endpoint_sha256,
+            method=self.method,
+            response_observed=self.response_observed,
+            response_status=self.response_status,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,9 +224,9 @@ class ChatMessageSnapshot:
 @dataclass(frozen=True, slots=True)
 class SendEvidence:
     """
-    表示一次单次提交后由页面中本人消息文本确认的最小证据。
+    表示一次单次提交后由网络请求与页面本人消息共同确认的最小证据。
 
-    证据只含绑定 ID、策略决策 ID、草稿摘要与确认消息指纹，不保存账号凭据。
+    证据只含绑定 ID、策略决策 ID、草稿摘要、确认消息指纹和脱敏网络事实，不保存账号凭据。
     """
 
     source_item_id: str
@@ -149,6 +235,52 @@ class SendEvidence:
     policy_decision_id: str
     draft_sha256: str
     confirmed_message_fingerprint: str
+    request_evidence: SendRequestEvidence
+
+
+def _endpoint_sha256(url: str) -> str:
+    """
+    将网络端点规范化为只含协议、主机和路径的 SHA-256。
+
+    输入请求或 WebSocket URL；返回十六进制摘要；查询参数和正文不会进入摘要或日志。
+    """
+
+    parsed = urlparse(url)
+    endpoint = f"{parsed.scheme.casefold()}://{(parsed.hostname or '').casefold()}{parsed.path}"
+    return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+
+
+def _is_allowed_send_host(url: str) -> bool:
+    """
+    判断网络事件是否来自闲鱼聊天可能使用的官方服务域名。
+
+    输入 URL；仅官方域名或其子域返回 True；解析失败返回 False，无网络副作用。
+    """
+
+    host = (urlparse(url).hostname or "").casefold()
+    return any(
+        host == suffix or host.endswith(f".{suffix}")
+        for suffix in ALLOWED_SEND_REQUEST_HOST_SUFFIXES
+    )
+
+
+def _payload_contains_draft(payload: str | bytes | None, draft_text: str) -> bool:
+    """
+    在内存中确认请求载荷包含本次完整草稿，避免把心跳或统计请求误作发送证据。
+
+    输入短生命周期载荷与草稿；返回布尔值；不返回、记录或持久化原始载荷。
+    """
+
+    if payload is None:
+        return False
+    raw = payload.decode("utf-8", errors="ignore") if isinstance(payload, bytes) else payload
+    normalized_draft = normalize_chat_text(draft_text)
+    candidates = (
+        raw,
+        unquote_plus(raw),
+        raw.replace(json.dumps(draft_text, ensure_ascii=True)[1:-1], draft_text),
+    )
+    return any(normalized_draft in normalize_chat_text(candidate) for candidate in candidates)
 
 
 def normalize_chat_text(value: str) -> str:
@@ -474,6 +606,8 @@ class XianyuChatClient:
         self._binding = binding
         self._account_guard = account_guard
         self._blocked_http_status: int | None = None
+        self._active_send_observation: _ActiveSendObservation | None = None
+        self._observed_page_ids: set[int] = set()
 
         def observe_status(response: Response) -> None:
             """
@@ -488,6 +622,94 @@ class XianyuChatClient:
         # 生产 Playwright BrowserContext 提供 on；离线 FakeContext 不注册网络监听器。
         if hasattr(self._page.context, "on"):
             self._page.context.on("response", observe_status)
+            self._page.context.on("request", self._observe_send_request)
+            self._page.context.on("response", self._observe_send_response)
+        self._register_page_send_observers(self._page)
+
+    def _register_page_send_observers(self, page: Page) -> None:
+        """
+        为当前聊天页注册 WebSocket 帧监听器且避免重复注册。
+
+        输入页面；无返回；只监听本次客户端生命周期内的新 WebSocket，不读取历史帧或正文。
+        """
+
+        page_identity = id(page)
+        if page_identity in self._observed_page_ids or not hasattr(page, "on"):
+            return
+        self._observed_page_ids.add(page_identity)
+        page.on("websocket", self._observe_websocket)
+
+    def _observe_send_request(self, request: Request) -> None:
+        """
+        识别点击窗口内携带完整草稿的官方 XHR/fetch 请求。
+
+        输入 Playwright 请求；无返回；只更新内存中的脱敏事实，不保存 URL、正文或请求头。
+        """
+
+        observation = self._active_send_observation
+        if observation is None or observation.request_observed:
+            return
+        if (
+            request.method.upper() not in ALLOWED_SEND_REQUEST_METHODS
+            or request.resource_type not in ALLOWED_SEND_REQUEST_RESOURCE_TYPES
+            or not _is_allowed_send_host(request.url)
+            or not _payload_contains_draft(request.post_data, observation.draft_text)
+        ):
+            return
+        observation.request_observed = True
+        observation.transport = "http"
+        observation.endpoint_sha256 = _endpoint_sha256(request.url)
+        observation.method = request.method.upper()
+        observation.request_identity = id(request)
+
+    def _observe_send_response(self, response: Response) -> None:
+        """
+        为已识别的 HTTP 发送请求记录粗粒度响应状态。
+
+        输入 Playwright 响应；无返回；不读取响应正文、响应头或重定向地址。
+        """
+
+        observation = self._active_send_observation
+        if (
+            observation is None
+            or observation.transport != "http"
+            or observation.request_identity is None
+            or id(response.request) != observation.request_identity
+        ):
+            return
+        observation.response_observed = True
+        observation.response_status = response.status
+
+    def _observe_websocket(self, websocket: WebSocket) -> None:
+        """
+        监听当前聊天页新 WebSocket 的出站帧，只匹配本次完整草稿。
+
+        输入 Playwright WebSocket；无返回；原始帧仅在回调内短暂检查且不会保存或记录。
+        """
+
+        def observe_frame(payload: str | bytes) -> None:
+            """
+            将携带完整草稿的官方 WebSocket 帧记为已发出。
+
+            输入单帧载荷；无返回；只写入脱敏摘要，原始载荷不会离开闭包。
+            """
+
+            observation = self._active_send_observation
+            if (
+                observation is None
+                or observation.request_observed
+                or not _is_allowed_send_host(websocket.url)
+                or not _payload_contains_draft(payload, observation.draft_text)
+            ):
+                return
+            observation.request_observed = True
+            observation.transport = "websocket"
+            observation.endpoint_sha256 = _endpoint_sha256(websocket.url)
+            observation.method = "FRAME"
+            observation.response_observed = False
+            observation.response_status = None
+
+        websocket.on("framesent", observe_frame)
 
     async def open_conversation(self) -> ChatMessageSnapshot:
         """
@@ -527,6 +749,7 @@ class XianyuChatClient:
                     "点击入口后无法唯一确认绑定聊天页",
                 )
             self._page = candidates[0]
+            self._register_page_send_observers(self._page)
             await self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
             await self._assert_bound_identity()
             await self._assert_chat_ready()
@@ -628,9 +851,38 @@ class XianyuChatClient:
 
             _, send_button = await self._assert_chat_ready()
             await self._assert_send_button_ready(send_button)
-            # 只执行一次已确认按钮点击；结果不确定时不会改用 Enter 或再次点击。
-            await send_button.click(timeout=5_000)
-            confirmation = await self._wait_for_own_confirmation(draft.text, own_count_before)
+            observation = _ActiveSendObservation(draft_text=draft.text)
+            self._active_send_observation = observation
+            try:
+                # 只执行一次可见鼠标轨迹点击；不注入脚本点击、不回退 Enter，也不再次点击。
+                await self._click_send_button_with_mouse(send_button)
+                confirmation = await self._wait_for_own_confirmation(
+                    draft.text,
+                    own_count_before,
+                )
+                request_evidence = await self._wait_for_send_request_evidence(observation)
+                if not request_evidence.request_observed:
+                    raise ChatSendUncertainError(
+                        "send_request_not_observed",
+                        "页面出现消息但未观察到匹配草稿的发送请求，禁止自动重试",
+                        request_evidence,
+                    )
+            except ChatSendUncertainError:
+                raise
+            except ChatSafetyError as exc:
+                raise ChatSendUncertainError(
+                    exc.code,
+                    str(exc),
+                    observation.snapshot(),
+                ) from None
+            except Exception:
+                raise ChatSendUncertainError(
+                    "send_pointer_result_uncertain",
+                    "唯一鼠标提交后的结果无法安全确认，禁止自动重试",
+                    observation.snapshot(),
+                ) from None
+            finally:
+                self._active_send_observation = None
             return SendEvidence(
                 source_item_id=self._binding.source_item_id,
                 seller_id=self._binding.seller_id,
@@ -640,7 +892,55 @@ class XianyuChatClient:
                     normalize_chat_text(draft.text).encode("utf-8")
                 ).hexdigest(),
                 confirmed_message_fingerprint=confirmation.fingerprint,
+                request_evidence=request_evidence,
             )
+
+    async def _click_send_button_with_mouse(self, send_button: Locator) -> None:
+        """
+        使用可见鼠标轨迹在发送按钮中心完成一次按下与松开。
+
+        输入已通过语义和唯一性校验的按钮；无返回；按钮不可见或边界异常时失败关闭。
+        本函数不使用 JavaScript click、不伪造浏览器指纹，也不提供任何风控绕过能力。
+        """
+
+        await send_button.scroll_into_view_if_needed(timeout=5_000)
+        box = await send_button.bounding_box()
+        if (
+            box is None
+            or box["width"] < 4
+            or box["height"] < 4
+        ):
+            raise ChatSafetyError(
+                "chat_send_button_geometry_invalid",
+                "聊天发送按钮没有可确认的可点击区域",
+            )
+        center_x = box["x"] + box["width"] / 2
+        center_y = box["y"] + box["height"] / 2
+        await self._page.mouse.move(
+            center_x,
+            center_y,
+            steps=SEND_POINTER_MOVE_STEPS,
+        )
+        await self._page.wait_for_timeout(SEND_POINTER_SETTLE_MS)
+        await self._page.mouse.down()
+        await self._page.wait_for_timeout(SEND_POINTER_PRESS_MS)
+        await self._page.mouse.up()
+
+    async def _wait_for_send_request_evidence(
+        self,
+        observation: _ActiveSendObservation,
+    ) -> SendRequestEvidence:
+        """
+        有界等待与草稿正文匹配的 XHR/fetch 请求或 WebSocket 出站帧。
+
+        输入当前点击窗口；返回脱敏证据；不读取响应正文且等待结束后不会触发重试。
+        """
+
+        for _ in range(SEND_REQUEST_WAIT_ATTEMPTS):
+            if observation.request_observed:
+                return observation.snapshot()
+            await self._page.wait_for_timeout(SEND_REQUEST_WAIT_DELAY_MS)
+        return observation.snapshot()
 
     async def _assert_safe(self) -> None:
         """
