@@ -96,11 +96,12 @@ HTTP 请求
 `off_shelf`；部分成功、风控和失败只保留本轮确实看到的商品，不进行缺失判断。首批清单控制在
 3 至 5 个词内，单轮上限保持 50 条；N 个持续到期词时，单个词约每 `N × 10` 分钟轮询一次。
 
-采购本地 API 对兼容 v1 请求继续校验 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST`，避免升级后扩大旧调用方
-权限；v2 由商城 Root/可信支付事件写入逐任务授权，不要求每次修改服务器静态白名单。随后扫描标题中
+采购本地 API 对 v1 与 v2 请求统一校验 `PROCUREMENT_SOURCE_ITEM_ALLOWLIST`；v2 还必须由商城
+Root/可信支付事件写入逐任务授权，两层门禁同时成立。随后扫描标题中
 的疑似客户或支付资料，再以请求幂等键和规范化 body SHA-256 查询原任务；同键同正文返回原任务，
-同键不同正文返回 409。首次创建必须能在 `items` 找到商品，且彦诗筛选源的最新 Catalog 快照为
-`active` 或 `suspected_missing`、币种为 CNY、价格与商城整数分快照完全一致。通过后在同一短事务中创建
+同键不同正文返回 409。首次创建必须能在 `items` 找到商品，并且彦诗筛选源存在 CNY 价格快照且价格
+与商城整数分快照完全一致；Catalog `availability` 只供目录展示和同步观察，不参与采购任务门禁，也
+不会触发闲鱼详情页实时核验。通过后在同一短事务中创建
 `ProcurementExecutionTask` 与 `ConversationSession`。商品 URL 不接受调用方输入，只从
 `Item.item_url` 复制到内部会话；仓储会先 flush 父任务，再 flush 带外键的会话，避免不同数据库
 对无 ORM relationship 对象采用不同插入顺序。测试 SQLite 显式开启外键约束，确保该 PostgreSQL
@@ -159,7 +160,7 @@ DeepSeek 草稿适配器不读取环境变量；worker 必须显式构造 `DeepS
 
 采购任务 API 使用与核验、Catalog Sync 分离的 `PROCUREMENT_API_TOKEN`，少于 32 字符按未配置处理并
 返回 503。兼容旧调用方时，API 容器还可配置逗号分隔的
-`PROCUREMENT_SOURCE_ITEM_ALLOWLIST`；该值只控制 v1，不会授权 v2 发送。回调另用
+`PROCUREMENT_SOURCE_ITEM_ALLOWLIST`；该值同时限制 v1 与 v2，但本身不会授权发送。回调另用
 `SHOPPING_PROCUREMENT_TOKEN`，并和 DeepSeek 密钥一样只注入 scheduler-worker，
 不注入 API 容器；这些令牌不进入请求体、响应、浏览器、数据库或普通日志。
 

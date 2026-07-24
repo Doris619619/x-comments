@@ -302,6 +302,10 @@ shopping 只能读取 `catalog_revisions.status=published` 的变更，不能直
 | `procurement_audit_logs` | 任务/会话/消息关联、actor、动作、前后状态、原因、脱敏元数据、关联与幂等键 | 只追加；同任务、幂等键和动作不得重复；普通日志不得记录消息正文 |
 | `procurement_outbox` | `event_id`、任务内 `event_seq`、事件类型、JSON payload、投递状态、租约、重试时间 | `event_id`、幂等键及 `(task_id, event_seq)` 唯一；供后续回调商城的事务 Outbox 使用 |
 
+采购任务仍保存创建时的标题和 CNY 整数分快照以便审计及阻止静默改价，但不保存或依赖 Catalog
+`availability` 作为聊天门禁。彦诗同步并进入单商品白名单的 Item 被视为已完成选品；创建任务不会
+再次打开闲鱼详情页核验库存，也不会因此触发下单、付款或填写地址。
+
 执行模式为 `paid_order` 或 `operator_canary`。任务级自动发送授权必须同时保存
 `auto_send_authorized=true`、`authorized_at` 和与模式匹配的 `authorization_source`；POC 测试支付
 使用 `operator_canary`，默认不授权自动发送。会话状态为 `pending_open`、`active`、`waiting_seller`、`completed`、

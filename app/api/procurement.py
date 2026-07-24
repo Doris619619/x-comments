@@ -44,19 +44,17 @@ from app.services.procurement_payload_safety import (
 router = APIRouter(prefix="/api/v1/procurement-tasks", tags=["procurement"])
 
 
-def require_legacy_procurement_source_allowlist(
+def require_procurement_source_allowlist(
     request: Request,
     payload: ProcurementTaskCreate,
 ) -> None:
     """
-    对旧版 v1 任务保留静态商品白名单，避免升级后扩大旧调用方权限。
+    对 v1 与 v2 采购任务统一执行服务器端单商品白名单。
 
-    输入应用状态和严格任务；v2 直接返回，v1 白名单未配置抛出 503，商品未获批
-    抛出 403；无写入副作用。v2 由商城 Root/支付授权、服务令牌和来源快照共同约束。
+    输入应用状态和严格任务；白名单未配置抛出 503，商品未获批抛出 403；
+    无写入副作用。逐任务授权不能替代服务器端白名单，两层门禁必须同时成立。
     """
 
-    if payload.contract_version == 2:
-        return
     allowed: object = getattr(request.app.state, "procurement_source_item_allowlist", None)
     if not isinstance(allowed, frozenset) or not allowed:
         raise HTTPException(
@@ -193,12 +191,12 @@ def create_procurement_task(
     service: ProcurementExecutionService = Depends(get_procurement_service),
 ) -> ProcurementTaskAccepted:
     """
-    幂等创建经本地 active/CNY/价格校验的采购执行任务与聊天会话。
+    幂等创建经白名单、CNY 快照和价格校验的采购执行任务与聊天会话。
 
     输入严格请求、幂等键和认证；成功返回 202；冲突、缺失或价格变化映射为明确错误。
     """
 
-    require_legacy_procurement_source_allowlist(request, payload)
+    require_procurement_source_allowlist(request, payload)
     try:
         assert_procurement_payload_safe(payload)
     except UnsafeProcurementPayloadError as exc:

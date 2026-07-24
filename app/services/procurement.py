@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
-from app.models.catalog_sync import CatalogAvailability
 from app.models.procurement import (
     ConversationMessage,
     ConversationSession,
@@ -25,11 +24,6 @@ from app.repositories.procurement import (
     ProcurementWriteConflictError,
 )
 from app.schemas.procurement import ProcurementTaskCreate
-
-CURATED_PROCUREMENT_AVAILABILITIES = {
-    CatalogAvailability.ACTIVE,
-    CatalogAvailability.SUSPECTED_MISSING,
-}
 
 
 class ProcurementServiceError(RuntimeError):
@@ -84,9 +78,9 @@ class ProcurementSourceItemNotFoundError(ProcurementServiceError):
 
 class ProcurementSourceUnavailableError(ProcurementServiceError):
     """
-    表示彦诗筛选商品的最新发布快照已明确售出、下架或状态未知。
+    表示彦诗筛选商品缺少可用于任务绑定的 CNY 价格快照。
 
-    API 应映射为 409；搜索轮询中的 suspected_missing 不属于明确不可用，但无快照不能降级。
+    API 应映射为 409；目录 availability 只用于前台同步观察，不再阻断采购对话任务。
     """
 
     code = "source_not_active"
@@ -225,9 +219,7 @@ class ProcurementExecutionService:
 
         self.repository = repository
 
-    def create(
-        self, payload: ProcurementTaskCreate, idempotency_key: str
-    ) -> ProcurementTaskResult:
+    def create(self, payload: ProcurementTaskCreate, idempotency_key: str) -> ProcurementTaskResult:
         """
         幂等创建已通过彦诗筛选源、CNY 与价格快照检查的任务和聊天会话。
 
@@ -360,17 +352,14 @@ class ProcurementExecutionService:
     @staticmethod
     def _validate_source(snapshot: ProcurementSourceSnapshot, expected_price_minor: int) -> None:
         """
-        校验彦诗筛选快照未明确下架、币种为 CNY 且价格与商城整数分快照一致。
+        信任彦诗筛选商品，只校验 CNY 快照存在且价格与商城整数分快照一致。
 
-        输入服务端快照和预期价格；失败抛出不可用或价格变化错误，无写入副作用。
+        输入服务端快照和预期价格；目录 availability 不参与判断；失败抛出快照缺失
+        或价格变化错误，无写入副作用，也不访问闲鱼详情页。
         """
 
-        if (
-            snapshot.availability not in CURATED_PROCUREMENT_AVAILABILITIES
-            or snapshot.price is None
-            or snapshot.currency != "CNY"
-        ):
-            raise ProcurementSourceUnavailableError("彦诗筛选商品已明确不可用或缺少 CNY 发布快照")
+        if snapshot.price is None or snapshot.currency != "CNY":
+            raise ProcurementSourceUnavailableError("彦诗筛选商品缺少 CNY 价格快照")
         expected_price = Decimal(expected_price_minor) / Decimal(100)
         if snapshot.price != expected_price:
             raise ProcurementSourcePriceChangedError("来源商品价格已变化")
